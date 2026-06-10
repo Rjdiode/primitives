@@ -883,6 +883,42 @@ function nonSelectedObjectPoints() {
   return pts;
 }
 
+function allObjectPoints() {
+  const pts = [];
+  for (const s of state.shapes) {
+    for (const sp of getShapeSnapPoints(s)) pts.push({ x: sp.x, y: sp.y });
+  }
+  return pts;
+}
+
+// 1-DOF: snap an H/V guide's value to an object snap-point coordinate on that
+// axis, else grid. Returns the value plus the object point matched (for feedback).
+function snapGuideAxis(axis, value) {
+  const R = SNAP_RADIUS / state.zoom;
+  let best = null, cost = R, marker = null;
+  for (const p of allObjectPoints()) {
+    const coord = axis === 'h' ? p.y : p.x;
+    const c = Math.abs(coord - value);
+    if (c < cost) { cost = c; best = coord; marker = p; }
+  }
+  if (best !== null) return { value: best, marker };
+  if (state.snapGrid) return { value: Math.round(value / GRID_SIZE) * GRID_SIZE, marker: null };
+  return { value, marker: null };
+}
+
+// 2-DOF: snap a guide anchor / vertex onto an object snap point, else grid.
+function snapGuidePoint(pt) {
+  const R = SNAP_RADIUS / state.zoom;
+  let best = null, cost = R;
+  for (const t of allObjectPoints()) {
+    const c = Math.hypot(t.x - pt.x, t.y - pt.y);
+    if (c < cost) { cost = c; best = { x: t.x, y: t.y }; }
+  }
+  if (best) return { x: best.x, y: best.y, marker: best };
+  if (state.snapGrid) { const g = snapToGrid(pt); return { x: g.x, y: g.y, marker: null }; }
+  return { x: pt.x, y: pt.y, marker: null };
+}
+
 // Adjusts a raw (dx0,dy0) move offset so a moving snap point lands on a guide
 // crossing, guide line, or another object's snap point. Falls back to grid.
 function snapMoveDelta(dx0, dy0) {
@@ -952,6 +988,7 @@ function beginGuideDrag(guide, raw, pointerId) {
   crosshair.hidden = true;
   state.isDraggingGuide = true;
   state.selectedGuide = guide;
+  state.dragSnapTarget = null;
   if (guide.type === 'h' || guide.type === 'v') {
     // Lift the line out of its array so the live dimension preview is the only copy.
     state.dragGuideOrig = guide.value;
@@ -959,7 +996,7 @@ function beginGuideDrag(guide, raw, pointerId) {
     state.previewGuide = { axis: guide.type, value: guide.value };
   } else {
     state.dragGuideOrig = { x: guide.ref.x, y: guide.ref.y };
-    state.dragAnchor = snapMovePoint(raw);
+    state.dragAnchor = { x: raw.x, y: raw.y }; // raw — object/grid snap applied per move
   }
   canvas.setPointerCapture(pointerId);
 }
@@ -967,14 +1004,19 @@ function beginGuideDrag(guide, raw, pointerId) {
 function updateGuideDrag(raw) {
   const g = state.selectedGuide;
   if (g.type === 'h' || g.type === 'v') {
-    const sp = snapMovePoint(raw);
-    const value = g.type === 'h' ? sp.y : sp.x;
+    const { value, marker } = snapGuideAxis(g.type, g.type === 'h' ? raw.y : raw.x);
     g.value = value;
     state.previewGuide = { axis: g.type, value };
+    state.dragSnapTarget = marker;
   } else {
-    const now = snapMovePoint(raw);
-    g.ref.x = state.dragGuideOrig.x + (now.x - state.dragAnchor.x);
-    g.ref.y = state.dragGuideOrig.y + (now.y - state.dragAnchor.y);
+    const base = {
+      x: state.dragGuideOrig.x + (raw.x - state.dragAnchor.x),
+      y: state.dragGuideOrig.y + (raw.y - state.dragAnchor.y),
+    };
+    const { x, y, marker } = snapGuidePoint(base);
+    g.ref.x = x;
+    g.ref.y = y;
+    state.dragSnapTarget = marker;
   }
 }
 
@@ -992,6 +1034,7 @@ function finishGuideDrag(commit = true) {
   state.isDraggingGuide = false;
   state.dragGuideOrig = null;
   state.dragAnchor = null;
+  state.dragSnapTarget = null;
 }
 
 // ─── Rendering ────────────────────────────────────────────────────────────────
@@ -1306,7 +1349,7 @@ function render() {
     if (selected) drawSnapPoints(shape);
   }
 
-  if (state.isDraggingShapes && state.dragSnapTarget) {
+  if ((state.isDraggingShapes || state.isDraggingGuide) && state.dragSnapTarget) {
     const t = state.dragSnapTarget;
     ctx.beginPath();
     ctx.arc(t.x, t.y, 5.5 / state.zoom, 0, Math.PI * 2);
