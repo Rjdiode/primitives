@@ -98,6 +98,24 @@ html, body {
 .toggle input { accent-color: var(--accent); width: 14px; height: 14px; }
 .toggle:has(input:checked) { color: var(--text); }
 
+.origin-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s;
+}
+
+.origin-toggle svg { flex-shrink: 0; }
+.origin-toggle:hover { color: var(--text); border-color: var(--accent); }
+
 .status {
   color: var(--muted);
   font-size: 10px;

@@ -7,12 +7,21 @@ const PROTRACTOR_STEP_DEG = 15;
 const PROTRACTOR_STEP = (PROTRACTOR_STEP_DEG * Math.PI) / 180;
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 8;
+const DIM_ARROW = 9;          // arrowhead length, screen px
+const DIM_LABEL_OFFSET = 12;  // label offset off the dimension line, screen px
 
 // ─── State ────────────────────────────────────────────────────────────────────
 const state = {
   tool: 'select',
   shapes: [],
   selectedIds: new Set(),
+  selectedGuide: null,       // { type:'h'|'v', value } | { type:'angle'|'vertex', ref }
+  isDraggingShapes: false,
+  isDraggingGuide: false,
+  dragAnchor: null,          // grid-snapped world point where a drag began
+  dragOriginals: null,       // Map<shapeId, geom> snapshot for shape moves
+  dragGuideOrig: null,       // original guide value / anchor for cancel + delta
+  dragSnapTarget: null,      // world point the moving selection snapped to (for feedback)
   guidesH: [],
   guidesV: [],
   guidesAngle: [],
@@ -28,6 +37,8 @@ const state = {
   snapGrid: true,
   snapObject: true,
   drawFromCenter: false,
+  originCorner: 'top-left',  // 'top-left' | 'bottom-left' — dimension reference corner
+  dimEntry: null,            // raw typed string while entering an exact guide dimension
   panX: 0,
   panY: 0,
   zoom: 1,
@@ -302,14 +313,15 @@ function angularGuideEndpoints(x, y, angle) {
   };
 }
 
-function drawAngularGuide(x, y, angle, preview = false) {
+function drawAngularGuide(x, y, angle, preview = false, selected = false) {
   const { x1, y1, x2, y2 } = angularGuideEndpoints(x, y, angle);
   ctx.beginPath();
   ctx.moveTo(x1, y1);
   ctx.lineTo(x2, y2);
-  ctx.strokeStyle = preview ? 'rgba(240, 160, 48, 0.9)' : 'rgba(186, 130, 255, 0.6)';
-  ctx.lineWidth = preview ? 2 / state.zoom : 1.25 / state.zoom;
-  ctx.setLineDash(preview ? [4 / state.zoom, 8 / state.zoom] : [5 / state.zoom, 9 / state.zoom]);
+  ctx.strokeStyle = preview ? 'rgba(240, 160, 48, 0.9)'
+    : selected ? 'rgba(214, 176, 255, 0.95)' : 'rgba(186, 130, 255, 0.6)';
+  ctx.lineWidth = (preview ? 2 : selected ? 2.25 : 1.25) / state.zoom;
+  ctx.setLineDash(preview ? [4 / state.zoom, 8 / state.zoom] : selected ? [] : [5 / state.zoom, 9 / state.zoom]);
   ctx.stroke();
   ctx.setLineDash([]);
 
@@ -396,6 +408,161 @@ function placeProtractorGuide() {
   if (state.protractorAngle === null) state.protractorAngle = 0;
   dropProtractorGuide();
   resetProtractor();
+}
+
+// ─── Dimensions ───────────────────────────────────────────────────────────────
+// Guide axes: 'h' guide carries a world-Y value; 'v' guide carries a world-X value.
+// X is always measured rightward from the left edge (both origin corners are "left"),
+// so the origin swap only flips the sign of the Y measurement.
+function worldToDim(axis, worldVal) {
+  if (axis === 'v') return worldVal;
+  return state.originCorner === 'bottom-left' ? -worldVal : worldVal;
+}
+
+function dimToWorld(axis, dimVal) {
+  if (axis === 'v') return dimVal;
+  return state.originCorner === 'bottom-left' ? -dimVal : dimVal;
+}
+
+function formatDim(v) {
+  return String(Math.round(v * 100) / 100); // integers plain, else up to 2 decimals
+}
+
+function setOrigin(corner) {
+  state.originCorner = corner;
+  const lbl = document.getElementById('origin-label');
+  if (lbl) lbl.textContent = `Origin: ${corner === 'bottom-left' ? 'bottom-left' : 'top-left'}`;
+  updateStatus();
+  render();
+}
+
+function toggleOrigin() {
+  setOrigin(state.originCorner === 'top-left' ? 'bottom-left' : 'top-left');
+}
+
+// Exact dimension entry — active whenever a ruler preview guide is showing.
+function applyDimEntry() {
+  if (!state.previewGuide) return;
+  const n = parseFloat(state.dimEntry);
+  if (Number.isFinite(n)) {
+    state.previewGuide.value = dimToWorld(state.previewGuide.axis, n);
+  }
+  updateStatus();
+  render();
+}
+
+function appendDim(ch) {
+  let s = state.dimEntry ?? '';
+  if (ch === '-') s = s.startsWith('-') ? s.slice(1) : '-' + s; // toggle sign
+  else if (ch === '.' && s.includes('.')) return;               // one decimal point
+  else s += ch;
+  state.dimEntry = s;
+  applyDimEntry();
+}
+
+function backspaceDim() {
+  if (state.dimEntry === null) return;
+  state.dimEntry = state.dimEntry.slice(0, -1) || null;
+  applyDimEntry();
+}
+
+function commitDim() {
+  if (!state.previewGuide) return;
+  addGuide(state.previewGuide.axis, state.previewGuide.value); // exact, not grid-snapped
+  state.dimEntry = null;
+  updateStatus();
+  render();
+}
+
+function cancelDim() {
+  state.dimEntry = null;
+  updateStatus();
+  render();
+}
+
+// Returns true if the key was consumed by dimension entry.
+function handleDimKey(e) {
+  const k = e.key;
+  if (k >= '0' && k <= '9') { appendDim(k); e.preventDefault(); return true; }
+  if (k === '.') { appendDim('.'); e.preventDefault(); return true; }
+  if (k === '-') { appendDim('-'); e.preventDefault(); return true; }
+  if (k === 'Backspace') { backspaceDim(); e.preventDefault(); return true; }
+  if (k === 'Enter') { commitDim(); e.preventDefault(); return true; }
+  if (k === 'Escape' && state.dimEntry !== null) { cancelDim(); e.preventDefault(); return true; }
+  if (state.dimEntry !== null) { e.preventDefault(); return true; } // swallow stray keys mid-entry
+  return false;
+}
+
+function drawArrowhead(x, y, ang) {
+  const s = DIM_ARROW;
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x - s * Math.cos(ang - 0.4), y - s * Math.sin(ang - 0.4));
+  ctx.lineTo(x - s * Math.cos(ang + 0.4), y - s * Math.sin(ang + 0.4));
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawDimLabel(cx, cy, axis, text) {
+  ctx.font = '11px IBM Plex Mono, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const tw = ctx.measureText(text).width;
+  let lx = cx, ly = cy;
+  if (axis === 'h') lx = cx + DIM_LABEL_OFFSET + tw / 2; // vertical leader → label to the right
+  else ly = cy - DIM_LABEL_OFFSET;                        // horizontal leader → label above
+  const padX = 5, padY = 3;
+  ctx.fillStyle = 'rgba(14, 15, 17, 0.9)';
+  ctx.fillRect(lx - tw / 2 - padX, ly - 7 - padY, tw + padX * 2, 14 + padY * 2);
+  ctx.fillStyle = '#f0a030';
+  ctx.fillText(text, lx, ly);
+}
+
+// Draws the linear dimension from the origin to the guide being set. Screen space,
+// clipped to the draw area, so arrows/text stay a constant size at any zoom.
+function drawDimensions() {
+  if (!state.previewGuide) return;
+  const dpr = window.devicePixelRatio || 1;
+  const { w, h } = drawAreaSize();
+  const { axis, value } = state.previewGuide;
+
+  const origin = worldToScreen(0, 0);
+  const guidePt = axis === 'h' ? worldToScreen(0, value) : worldToScreen(value, 0);
+
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.beginPath();
+  ctx.rect(RULER_SIZE, 0, w, h);
+  ctx.clip();
+
+  const { x: ax, y: ay } = origin;
+  const { x: bx, y: by } = guidePt;
+  const len = Math.hypot(bx - ax, by - ay);
+
+  ctx.strokeStyle = 'rgba(240, 160, 48, 0.95)';
+  ctx.fillStyle = 'rgba(240, 160, 48, 0.95)';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([]);
+
+  if (len > 1) {
+    const ang = Math.atan2(by - ay, bx - ax);
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(bx, by);
+    ctx.stroke();
+    drawArrowhead(bx, by, ang);            // points away from origin
+    drawArrowhead(ax, ay, ang + Math.PI);  // points away from guide
+  }
+
+  // origin marker
+  ctx.beginPath();
+  ctx.arc(ax, ay, 3, 0, Math.PI * 2);
+  ctx.fill();
+
+  const dimVal = state.dimEntry !== null ? (state.dimEntry || '0') : formatDim(worldToDim(axis, value));
+  drawDimLabel((ax + bx) / 2, (ay + by) / 2, axis, `${dimVal} px`);
+
+  ctx.restore();
 }
 
 // ─── Snap ─────────────────────────────────────────────────────────────────────
@@ -623,6 +790,210 @@ function addSegment(a, b) {
   state.selectedIds = new Set([shape.id]);
 }
 
+// ─── Selection & move ─────────────────────────────────────────────────────────
+function snapMovePoint(p) {
+  return state.snapGrid ? snapToGrid(p) : { x: p.x, y: p.y };
+}
+
+function distToAngledGuide(wx, wy, g) {
+  return Math.abs((wx - g.x) * Math.sin(g.angle) - (wy - g.y) * Math.cos(g.angle));
+}
+
+// Returns the topmost guide-like entity under the point, or null.
+// Priority: point handles (vertices, angled anchors) before lines.
+function hitTestGuide(wx, wy) {
+  const lineTol = 6 / state.zoom;
+  const ptTol = CROSSING_RADIUS / state.zoom;
+  for (const v of state.vertices) {
+    if (Math.hypot(v.x - wx, v.y - wy) < ptTol) return { type: 'vertex', ref: v };
+  }
+  for (const g of state.guidesAngle) {
+    if (Math.hypot(g.x - wx, g.y - wy) < ptTol) return { type: 'angle', ref: g };
+  }
+  for (const g of state.guidesAngle) {
+    if (distToAngledGuide(wx, wy, g) < lineTol) return { type: 'angle', ref: g };
+  }
+  for (const y of state.guidesH) {
+    if (Math.abs(wy - y) < lineTol) return { type: 'h', value: y };
+  }
+  for (const x of state.guidesV) {
+    if (Math.abs(wx - x) < lineTol) return { type: 'v', value: x };
+  }
+  return null;
+}
+
+function deleteSelectedGuide() {
+  const g = state.selectedGuide;
+  if (!g) return false;
+  if (g.type === 'h') removeGuide('h', g.value);
+  else if (g.type === 'v') removeGuide('v', g.value);
+  else if (g.type === 'angle') state.guidesAngle = state.guidesAngle.filter(x => x !== g.ref);
+  else if (g.type === 'vertex') state.vertices = state.vertices.filter(x => x !== g.ref);
+  state.selectedGuide = null;
+  return true;
+}
+
+function cloneGeom(s) {
+  if (s.points) return { points: s.points.map(p => ({ x: p.x, y: p.y })) };
+  return { x: s.x, y: s.y, x2: s.x2, y2: s.y2 };
+}
+
+function translateShapeFrom(shape, orig, dx, dy) {
+  if (orig.points) {
+    shape.points = orig.points.map(p => ({ x: p.x + dx, y: p.y + dy }));
+  } else {
+    shape.x = orig.x + dx; shape.y = orig.y + dy;
+    shape.x2 = orig.x2 + dx; shape.y2 = orig.y2 + dy;
+  }
+}
+
+function beginShapeDrag(raw, pointerId) {
+  snapIndicator.hidden = true;
+  crosshair.hidden = true;
+  state.isDraggingShapes = true;
+  state.dragAnchor = { x: raw.x, y: raw.y }; // raw (unsnapped) — snapping happens per snap-point
+  state.dragSnapTarget = null;
+  state.dragOriginals = new Map();
+  for (const s of state.shapes) {
+    if (state.selectedIds.has(s.id)) state.dragOriginals.set(s.id, cloneGeom(s));
+  }
+  canvas.setPointerCapture(pointerId);
+}
+
+// Snap points of the moving selection, evaluated at a tentative (dx,dy) offset.
+function movingSnapPoints(dx, dy) {
+  const pts = [];
+  for (const s of state.shapes) {
+    const orig = state.dragOriginals.get(s.id);
+    if (!orig) continue;
+    const moved = orig.points
+      ? { type: s.type, points: orig.points.map(p => ({ x: p.x + dx, y: p.y + dy })) }
+      : { type: s.type, x: orig.x + dx, y: orig.y + dy, x2: orig.x2 + dx, y2: orig.y2 + dy };
+    for (const sp of getShapeSnapPoints(moved)) pts.push(sp);
+  }
+  return pts;
+}
+
+function nonSelectedObjectPoints() {
+  const pts = [];
+  for (const s of state.shapes) {
+    if (state.selectedIds.has(s.id)) continue;
+    for (const sp of getShapeSnapPoints(s)) pts.push({ x: sp.x, y: sp.y });
+  }
+  return pts;
+}
+
+// Adjusts a raw (dx0,dy0) move offset so a moving snap point lands on a guide
+// crossing, guide line, or another object's snap point. Falls back to grid.
+function snapMoveDelta(dx0, dy0) {
+  const R = SNAP_RADIUS / state.zoom;
+  const pts = movingSnapPoints(dx0, dy0);
+
+  // 1. Two-DOF targets: crossings, other objects' points, and angled-guide lines.
+  const fullTargets = getCrossings().concat(nonSelectedObjectPoints());
+  let best2D = null, cost2D = R, target = null;
+  for (const m of pts) {
+    for (const t of fullTargets) {
+      const c = Math.hypot(t.x - m.x, t.y - m.y);
+      if (c < cost2D) { cost2D = c; best2D = { cx: t.x - m.x, cy: t.y - m.y }; target = { x: t.x, y: t.y }; }
+    }
+    for (const g of state.guidesAngle) {
+      const s = (m.x - g.x) * Math.sin(g.angle) - (m.y - g.y) * Math.cos(g.angle);
+      if (Math.abs(s) < cost2D) {
+        cost2D = Math.abs(s);
+        best2D = { cx: -s * Math.sin(g.angle), cy: s * Math.cos(g.angle) };
+        target = { x: m.x - s * Math.sin(g.angle), y: m.y + s * Math.cos(g.angle) };
+      }
+    }
+  }
+  if (best2D) return { dx: dx0 + best2D.cx, dy: dy0 + best2D.cy, target };
+
+  // 2. Independent per-axis snap: V guides / grid for x, H guides / grid for y.
+  let bestX = null, costX = R, bestY = null, costY = R;
+  for (const m of pts) {
+    for (const gx of state.guidesV) { const c = Math.abs(gx - m.x); if (c < costX) { costX = c; bestX = gx - m.x; } }
+    for (const gy of state.guidesH) { const c = Math.abs(gy - m.y); if (c < costY) { costY = c; bestY = gy - m.y; } }
+    if (state.snapGrid) {
+      const gx = Math.round(m.x / GRID_SIZE) * GRID_SIZE; const cx = Math.abs(gx - m.x);
+      if (cx < costX) { costX = cx; bestX = gx - m.x; }
+      const gy = Math.round(m.y / GRID_SIZE) * GRID_SIZE; const cy = Math.abs(gy - m.y);
+      if (cy < costY) { costY = cy; bestY = gy - m.y; }
+    }
+  }
+  return { dx: dx0 + (bestX ?? 0), dy: dy0 + (bestY ?? 0), target: null };
+}
+
+function updateShapeDrag(raw) {
+  const { dx, dy, target } = snapMoveDelta(raw.x - state.dragAnchor.x, raw.y - state.dragAnchor.y);
+  state.dragSnapTarget = target;
+  for (const s of state.shapes) {
+    const orig = state.dragOriginals.get(s.id);
+    if (orig) translateShapeFrom(s, orig, dx, dy);
+  }
+}
+
+function restoreShapeDrag() {
+  if (!state.dragOriginals) return;
+  for (const s of state.shapes) {
+    const orig = state.dragOriginals.get(s.id);
+    if (orig) translateShapeFrom(s, orig, 0, 0);
+  }
+}
+
+function endShapeDrag() {
+  state.isDraggingShapes = false;
+  state.dragOriginals = null;
+  state.dragAnchor = null;
+  state.dragSnapTarget = null;
+}
+
+function beginGuideDrag(guide, raw, pointerId) {
+  snapIndicator.hidden = true;
+  crosshair.hidden = true;
+  state.isDraggingGuide = true;
+  state.selectedGuide = guide;
+  if (guide.type === 'h' || guide.type === 'v') {
+    // Lift the line out of its array so the live dimension preview is the only copy.
+    state.dragGuideOrig = guide.value;
+    removeGuide(guide.type, guide.value);
+    state.previewGuide = { axis: guide.type, value: guide.value };
+  } else {
+    state.dragGuideOrig = { x: guide.ref.x, y: guide.ref.y };
+    state.dragAnchor = snapMovePoint(raw);
+  }
+  canvas.setPointerCapture(pointerId);
+}
+
+function updateGuideDrag(raw) {
+  const g = state.selectedGuide;
+  if (g.type === 'h' || g.type === 'v') {
+    const sp = snapMovePoint(raw);
+    const value = g.type === 'h' ? sp.y : sp.x;
+    g.value = value;
+    state.previewGuide = { axis: g.type, value };
+  } else {
+    const now = snapMovePoint(raw);
+    g.ref.x = state.dragGuideOrig.x + (now.x - state.dragAnchor.x);
+    g.ref.y = state.dragGuideOrig.y + (now.y - state.dragAnchor.y);
+  }
+}
+
+function finishGuideDrag(commit = true) {
+  const g = state.selectedGuide;
+  if (g && (g.type === 'h' || g.type === 'v')) {
+    const value = commit ? g.value : state.dragGuideOrig;
+    addGuide(g.type, value);
+    g.value = value;
+    state.previewGuide = null;
+  } else if (g && !commit) {
+    g.ref.x = state.dragGuideOrig.x;
+    g.ref.y = state.dragGuideOrig.y;
+  }
+  state.isDraggingGuide = false;
+  state.dragGuideOrig = null;
+  state.dragAnchor = null;
+}
+
 // ─── Rendering ────────────────────────────────────────────────────────────────
 function drawGrid() {
   const view = getViewBounds();
@@ -656,7 +1027,7 @@ function drawGrid() {
   }
 }
 
-function drawGuideLine(axis, value, preview = false) {
+function drawGuideLine(axis, value, preview = false, selected = false) {
   const view = getViewBounds();
   ctx.beginPath();
   if (axis === 'h') {
@@ -666,9 +1037,10 @@ function drawGuideLine(axis, value, preview = false) {
     ctx.moveTo(value, view.top);
     ctx.lineTo(value, view.bottom);
   }
-  ctx.strokeStyle = preview ? 'rgba(240, 160, 48, 0.75)' : 'rgba(78, 205, 196, 0.5)';
-  ctx.lineWidth = preview ? 1.5 / state.zoom : 1 / state.zoom;
-  ctx.setLineDash(preview ? [10 / state.zoom, 7 / state.zoom] : [6 / state.zoom, 5 / state.zoom]);
+  ctx.strokeStyle = preview ? 'rgba(240, 160, 48, 0.75)'
+    : selected ? 'rgba(130, 240, 230, 0.95)' : 'rgba(78, 205, 196, 0.5)';
+  ctx.lineWidth = (preview ? 1.5 : selected ? 2.25 : 1) / state.zoom;
+  ctx.setLineDash(preview ? [10 / state.zoom, 7 / state.zoom] : selected ? [] : [6 / state.zoom, 5 / state.zoom]);
   ctx.stroke();
   ctx.setLineDash([]);
 }
@@ -679,6 +1051,13 @@ function drawGuides() {
   if (state.previewGuide) drawGuideLine(state.previewGuide.axis, state.previewGuide.value, true);
 
   for (const g of state.guidesAngle) drawAngularGuide(g.x, g.y, g.angle);
+
+  const sg = state.selectedGuide;
+  if (sg && !state.isDraggingGuide) {
+    if (sg.type === 'h') drawGuideLine('h', sg.value, false, true);
+    else if (sg.type === 'v') drawGuideLine('v', sg.value, false, true);
+    else if (sg.type === 'angle') drawAngularGuide(sg.ref.x, sg.ref.y, sg.ref.angle, false, true);
+  }
 
   if (state.protractorActive && state.protractorVertex) {
     drawAngularGuide(
@@ -699,6 +1078,14 @@ function drawGuides() {
     ctx.fill();
     ctx.strokeStyle = 'rgba(78, 205, 196, 0.8)';
     ctx.lineWidth = 1 / state.zoom;
+    ctx.stroke();
+  }
+
+  if (sg && (sg.type === 'vertex' || sg.type === 'angle')) {
+    ctx.beginPath();
+    ctx.arc(sg.ref.x, sg.ref.y, r + 3 / state.zoom, 0, Math.PI * 2);
+    ctx.strokeStyle = sg.type === 'angle' ? '#d6b0ff' : '#82e6e6';
+    ctx.lineWidth = 2 / state.zoom;
     ctx.stroke();
   }
 
@@ -919,6 +1306,15 @@ function render() {
     if (selected) drawSnapPoints(shape);
   }
 
+  if (state.isDraggingShapes && state.dragSnapTarget) {
+    const t = state.dragSnapTarget;
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, 5.5 / state.zoom, 0, Math.PI * 2);
+    ctx.strokeStyle = '#f0a030';
+    ctx.lineWidth = 2 / state.zoom;
+    ctx.stroke();
+  }
+
   if (state.isDrawing && state.drawStart && state.drawCurrent) {
     const preview = buildPreviewShape();
     if (preview) drawShape(preview, true);
@@ -928,6 +1324,7 @@ function render() {
   drawMarquee();
   ctx.restore();
 
+  drawDimensions();
   drawRulers();
 }
 
@@ -1004,6 +1401,10 @@ function setTool(tool) {
   if (tool !== 'protractor') resetProtractor();
   state.segmentStart = null;
   state.segmentHover = null;
+  state.selectedGuide = null;
+  endShapeDrag();
+  state.isDraggingGuide = false;
+  workspace.style.cursor = '';
   state.tool = tool;
   document.querySelectorAll('.tool').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.tool === tool);
@@ -1016,8 +1417,13 @@ function setTool(tool) {
 
 function updateStatus() {
   if (state.previewGuide) {
-    const label = state.previewGuide.axis === 'h' ? `H guide @ ${state.previewGuide.value}` : `V guide @ ${state.previewGuide.value}`;
-    statusEl.textContent = label;
+    const { axis, value } = state.previewGuide;
+    const dim = formatDim(worldToDim(axis, value));
+    if (state.dimEntry !== null) {
+      statusEl.textContent = `${state.dimEntry || '0'} px · Enter to place`;
+    } else {
+      statusEl.textContent = `${axis === 'h' ? 'Y' : 'X'} ${dim} px · type for exact`;
+    }
     return;
   }
   if (state.tool === 'protractor') {
@@ -1085,6 +1491,11 @@ function resize() {
 
 // ─── Ruler input ──────────────────────────────────────────────────────────────
 function handleRulerMove(axis, clientPos, shiftKey) {
+  // While typing an exact dimension on this axis, freeze pointer tracking.
+  if (state.dimEntry !== null && state.previewGuide?.axis === axis) {
+    updateStatus();
+    return;
+  }
   const value = axis === 'h' ? worldYFromClientY(clientPos) : worldXFromClientX(clientPos);
   state.previewGuide = { axis, value };
   updateStatus();
@@ -1092,6 +1503,7 @@ function handleRulerMove(axis, clientPos, shiftKey) {
 }
 
 function handleRulerDown(axis, clientPos, shiftKey) {
+  state.dimEntry = null;
   const value = axis === 'h' ? worldYFromClientY(clientPos) : worldXFromClientX(clientPos);
   if (shiftKey) removeNearestGuide(axis, value);
   else addGuide(axis, value);
@@ -1101,6 +1513,7 @@ function handleRulerDown(axis, clientPos, shiftKey) {
 }
 
 function handleRulerLeave() {
+  if (state.dimEntry !== null) return; // keep the preview alive so Enter can still place it
   state.previewGuide = null;
   updateStatus();
   render();
@@ -1117,6 +1530,7 @@ function bindRuler(el, axis) {
   el.addEventListener('pointerleave', handleRulerLeave);
   el.addEventListener('wheel', (e) => {
     e.preventDefault();
+    if (state.dimEntry !== null && state.previewGuide?.axis === axis) return; // frozen while typing
     const rawDelta = axis === 'h' ? e.deltaY : (e.deltaX !== 0 ? e.deltaX : e.deltaY);
     const delta = rawDelta / state.zoom;
     const current = state.previewGuide?.axis === axis
@@ -1197,15 +1611,28 @@ function onPointerDown(e) {
         if (state.selectedIds.has(hit.id)) state.selectedIds.delete(hit.id);
         else state.selectedIds.add(hit.id);
       } else {
-        state.selectedIds = new Set([hit.id]);
+        if (!state.selectedIds.has(hit.id)) state.selectedIds = new Set([hit.id]);
+        state.selectedGuide = null;
+        beginShapeDrag(raw, e.pointerId);
       }
-    } else {
-      state.isMarquee = true;
-      state.marqueeStart = raw;
-      state.marqueeCurrent = raw;
-      if (!state._shiftHeld) state.selectedIds.clear();
-      canvas.setPointerCapture(e.pointerId);
+      render();
+      return;
     }
+
+    const hitGuide = hitTestGuide(raw.x, raw.y);
+    if (hitGuide) {
+      state.selectedIds.clear();
+      beginGuideDrag(hitGuide, raw, e.pointerId);
+      render();
+      return;
+    }
+
+    state.isMarquee = true;
+    state.marqueeStart = raw;
+    state.marqueeCurrent = raw;
+    state.selectedGuide = null;
+    if (!state._shiftHeld) state.selectedIds.clear();
+    canvas.setPointerCapture(e.pointerId);
     render();
     return;
   }
@@ -1227,6 +1654,19 @@ function onPointerMove(e) {
 
   const raw = getPointerPos(e);
 
+  if (state.isDraggingShapes) {
+    updateShapeDrag(raw);
+    render();
+    return;
+  }
+
+  if (state.isDraggingGuide) {
+    updateGuideDrag(raw);
+    updateStatus();
+    render();
+    return;
+  }
+
   if (isSegmentTool()) {
     state.segmentHover = state.segmentStart ? crossingsOnGuideFrom(state.segmentStart, raw) : nearestCrossing(raw);
     updateCrossingOverlay(state.segmentHover || state.segmentStart);
@@ -1244,6 +1684,11 @@ function onPointerMove(e) {
     updateCrossingOverlay(vertex || state.protractorVertex);
     render();
     return;
+  }
+
+  if (state.tool === 'select' && !state.isMarquee) {
+    const overMovable = findShapeAt(raw.x, raw.y) || hitTestGuide(raw.x, raw.y);
+    workspace.style.cursor = overMovable ? 'move' : '';
   }
 
   state._hoverWorld = raw;
@@ -1265,6 +1710,21 @@ function onPointerUp(e) {
     state.isPanning = false;
     state._panStart = null;
     workspace.classList.remove('panning');
+    return;
+  }
+
+  if (state.isDraggingShapes) {
+    endShapeDrag();
+    render();
+    try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+    return;
+  }
+
+  if (state.isDraggingGuide) {
+    finishGuideDrag(true);
+    updateStatus();
+    render();
+    try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
     return;
   }
 
@@ -1320,6 +1780,11 @@ const TOOL_KEYS = {
 function onKeyDown(e) {
   if (e.target.tagName === 'INPUT') return;
 
+  // Exact dimension entry takes priority while a guide is being set.
+  if (state.previewGuide && handleDimKey(e)) return;
+
+  if (e.key.toLowerCase() === 'o') { toggleOrigin(); return; }
+
   if (e.code === 'Space' && !state.spaceHeld) {
     e.preventDefault();
     state.spaceHeld = true;
@@ -1331,13 +1796,22 @@ function onKeyDown(e) {
   const tool = TOOL_KEYS[e.key.toLowerCase()];
   if (tool) setTool(tool);
 
-  if ((e.key === 'Backspace' || e.key === 'Delete') && state.selectedIds.size > 0) {
-    state.shapes = state.shapes.filter(s => !state.selectedIds.has(s.id));
-    state.selectedIds.clear();
-    render();
+  if (e.key === 'Backspace' || e.key === 'Delete') {
+    let changed = false;
+    if (state.selectedIds.size > 0) {
+      state.shapes = state.shapes.filter(s => !state.selectedIds.has(s.id));
+      state.selectedIds.clear();
+      changed = true;
+    }
+    if (state.selectedGuide) changed = deleteSelectedGuide() || changed;
+    if (changed) render();
   }
 
   if (e.key === 'Escape') {
+    if (state.isDraggingGuide) finishGuideDrag(false);
+    if (state.isDraggingShapes) restoreShapeDrag();
+    endShapeDrag();
+    state.selectedGuide = null;
     state.selectedIds.clear();
     state.segmentStart = null;
     state.segmentHover = null;
@@ -1383,6 +1857,9 @@ function init() {
   snapObjectToggle.addEventListener('change', e => { state.snapObject = e.target.checked; render(); });
   drawCenterToggle.addEventListener('change', e => { state.drawFromCenter = e.target.checked; });
 
+  const originBtn = document.getElementById('origin-toggle');
+  if (originBtn) originBtn.addEventListener('click', toggleOrigin);
+
   bindRuler(rulerV, 'h');
   bindRuler(rulerH, 'v');
 
@@ -1396,6 +1873,7 @@ function init() {
   });
   canvas.addEventListener('pointermove', (e) => {
     if (isInDrawArea(e.clientX, e.clientY) || state.isPanning
+        || state.isDraggingShapes || state.isDraggingGuide
         || (state.tool === 'protractor' && state.protractorActive)) {
       onPointerMove(e);
     }
