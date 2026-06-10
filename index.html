@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Primitives</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Syne:wght@600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="toolbar">
+      <div class="brand">Primitives</div>
+      <div class="tools" id="tools" role="toolbar" aria-label="Drawing tools">
+        <button type="button" class="tool active" data-tool="select" title="Select (V)">
+          <svg viewBox="0 0 24 24" width="18" height="18"><path d="M4 4l7 17 2.5-7.5L21 11z" fill="currentColor"/></svg>
+          <span>Select</span>
+        </button>
+        <button type="button" class="tool" data-tool="stroke" title="Stroke (P)">
+          <svg viewBox="0 0 24 24" width="18" height="18"><path d="M3 17l6-6 4 4 8-10" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+          <span>Stroke</span>
+        </button>
+        <button type="button" class="tool" data-tool="line" title="Line (L)">
+          <svg viewBox="0 0 24 24" width="18" height="18"><line x1="4" y1="20" x2="20" y2="4" stroke="currentColor" stroke-width="2"/></svg>
+          <span>Line</span>
+        </button>
+        <button type="button" class="tool" data-tool="protractor" title="Protractor (T)">
+          <svg viewBox="0 0 24 24" width="18" height="18"><path d="M3 20h18M3 20A17 17 0 0118 6" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+          <span>Protractor</span>
+        </button>
+        <button type="button" class="tool" data-tool="rect" title="Rectangle">
+          <svg viewBox="0 0 24 24" width="18" height="18"><rect x="4" y="6" width="16" height="12" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+          <span>Rect</span>
+        </button>
+        <button type="button" class="tool" data-tool="square" title="Square (S)">
+          <svg viewBox="0 0 24 24" width="18" height="18"><rect x="5" y="5" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+          <span>Square</span>
+        </button>
+        <button type="button" class="tool" data-tool="ellipse" title="Ellipse (E)">
+          <svg viewBox="0 0 24 24" width="18" height="18"><ellipse cx="12" cy="12" rx="9" ry="6" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+          <span>Ellipse</span>
+        </button>
+        <button type="button" class="tool" data-tool="circle" title="Circle (C)">
+          <svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+          <span>Circle</span>
+        </button>
+      </div>
+      <div class="toggles">
+        <label class="toggle" title="Snap to grid">
+          <input type="checkbox" id="snap-grid" checked />
+          <span>Grid snap</span>
+        </label>
+        <label class="toggle" title="Snap to object points">
+          <input type="checkbox" id="snap-object" checked />
+          <span>Object snap</span>
+        </label>
+        <label class="toggle" title="Draw shapes from center point">
+          <input type="checkbox" id="draw-center" />
+          <span>From center</span>
+        </label>
+      </div>
+      <div class="status" id="status">Ready</div>
+    </header>
+
+    <main class="workspace" id="workspace" tabindex="0">
+      <canvas id="canvas"></canvas>
+      <div class="ruler-v" id="ruler-v" title="Hover to preview · click to place horizontal guide"></div>
+      <div class="ruler-h" id="ruler-h" title="Hover to preview · click to place vertical guide"></div>
+      <div class="canvas-overlays">
+        <div class="crosshair" id="crosshair" hidden></div>
+        <div class="snap-indicator" id="snap-indicator" hidden></div>
+      </div>
+    </main>
+
+    <footer class="hints">
+      <span><kbd>V</kbd> select</span>
+      <span><kbd>P</kbd> stroke</span>
+      <span><kbd>L</kbd> line</span>
+      <span><kbd>T</kbd> protractor</span>
+      <span>protractor · click grid · scroll · click place</span>
+      <span>rulers · place guides</span>
+      <span>canvas · click crossings</span>
+      <span><kbd>Shift</kbd> + ruler click removes guide</span>
+      <span><kbd>Space</kbd> pan</span>
+      <span><kbd>⌫</kbd> delete</span>
+    </footer>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
