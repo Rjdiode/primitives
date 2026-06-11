@@ -46,6 +46,14 @@
           <svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/></svg>
           <span>Circle</span>
         </button>
+        <button type="button" class="tool" data-tool="brush" title="Brush (B) — hold 1/2/3/4 for 0°/45°/90°/135° hatch; trackpad moves, keys ink">
+          <svg viewBox="0 0 24 24" width="18" height="18"><path d="M5 5l6 6M9 5l6 6M5 9l6 6" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="13" y="13" width="7" height="5" transform="rotate(45 16.5 15.5)" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+          <span>Brush</span>
+        </button>
+        <button type="button" class="tool" data-tool="eraser" title="Eraser (X) — hold 1–4 and move to wipe hatches">
+          <svg viewBox="0 0 24 24" width="18" height="18"><rect x="4" y="11" width="12" height="8" rx="1.5" transform="rotate(-45 10 15)" fill="none" stroke="currentColor" stroke-width="1.8"/><line x1="9" y1="20" x2="20" y2="20" stroke="currentColor" stroke-width="1.8"/></svg>
+          <span>Eraser</span>
+        </button>
       </div>
       <div class="toggles">
         <label class="toggle" title="Snap to grid">
@@ -83,6 +91,8 @@
       <span><kbd>P</kbd> stroke</span>
       <span><kbd>L</kbd> line</span>
       <span><kbd>T</kbd> protractor</span>
+      <span><kbd>B</kbd> brush · hold <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>4</kbd> hatch</span>
+      <span><kbd>X</kbd> eraser · hold <kbd>1</kbd>–<kbd>4</kbd></span>
       <span>protractor · click grid · scroll · click place</span>
       <span>rect/ellipse · click · move · type W <kbd>⇥</kbd> H · click</span>
       <span>rulers · place guides · type value + <kbd>↵</kbd> for exact</span>

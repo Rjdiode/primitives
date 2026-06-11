@@ -10,6 +10,19 @@ const MAX_ZOOM = 8;
 const DIM_ARROW = 9;          // arrowhead length, screen px
 const DIM_LABEL_OFFSET = 12;  // label offset off the dimension line, screen px
 
+// ─── Brush / cross-hatch ────────────────────────────────────────────────────────
+// Hatch keys pick the angle of the parallel lines; the brush rectangle is oriented
+// perpendicular to them. Marks live on a per-angle lattice (intrinsic to the hatch,
+// independent of the document grid) so repeated passes stay clean and de-duplicate.
+const HATCH_ANGLES = { '1': 0, '2': Math.PI / 4, '3': Math.PI / 2, '4': (3 * Math.PI) / 4 };
+const HATCH_ANGLE_IDX = { '1': 0, '2': 1, '3': 2, '4': 3 };
+const HATCH_SPACING = 6;   // gap between parallel hatch lines (world px)
+const HATCH_CELL = 6;      // length of one deposited mark along the line (world px)
+const BRUSH_LEN = 46;      // brush extent perpendicular to the hatch (across the lines)
+const BRUSH_THICK = 20;    // brush extent along the hatch (length laid down per stamp)
+const BRUSH_STEP = 5;      // path interpolation step while dragging (world px)
+const ERASER_SIZE = 30;    // eraser square footprint (world px)
+
 // ─── State ────────────────────────────────────────────────────────────────────
 const state = {
   tool: 'select',
@@ -57,6 +70,13 @@ const state = {
   spaceHeld: false,
   activeSnap: null,
   _hoverWorld: null,
+  hatches: [],               // deposited hatch marks: { key, x1, y1, x2, y2 }
+  hatchKeySet: new Set(),    // lattice keys present in hatches (fast de-dupe)
+  brushAngleKey: null,       // '1'..'4' while a hatch key is held (pen down), else null
+  brushAngle: 0,             // last chosen hatch angle (radians) — drives the preview
+  brushLast: null,           // last brush world point, for path interpolation
+  eraserDown: false,         // true while an erase key is held
+  eraserLast: null,          // last eraser world point, for path interpolation
 };
 
 // ─── DOM ──────────────────────────────────────────────────────────────────────
@@ -1376,6 +1396,42 @@ function drawShape(shape, isPreview = false, isSelected = false) {
   }
 }
 
+function drawHatches() {
+  if (!state.hatches.length) return;
+  ctx.strokeStyle = '#e8eaed';
+  ctx.lineWidth = 1.4 / state.zoom;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  for (const h of state.hatches) {
+    ctx.moveTo(h.x1, h.y1);
+    ctx.lineTo(h.x2, h.y2);
+  }
+  ctx.stroke();
+}
+
+// Footprint that follows the cursor: rotated rectangle (brush, ⟂ to the hatch) or
+// square (eraser). Brightens while the pen/eraser is pressed.
+function drawBrushPreview() {
+  if (!isBrushTool()) return;
+  const c = state._hoverWorld;
+  if (!c) return;
+  ctx.save();
+  ctx.translate(c.x, c.y);
+  ctx.lineWidth = 1 / state.zoom;
+  ctx.setLineDash([4 / state.zoom, 3 / state.zoom]);
+  if (state.tool === 'brush') {
+    const ang = state.brushAngleKey ? HATCH_ANGLES[state.brushAngleKey] : state.brushAngle;
+    ctx.rotate(ang);
+    ctx.strokeStyle = state.brushAngleKey ? '#f0a030' : 'rgba(240, 160, 48, 0.55)';
+    ctx.strokeRect(-BRUSH_THICK / 2, -BRUSH_LEN / 2, BRUSH_THICK, BRUSH_LEN);
+  } else {
+    ctx.strokeStyle = state.eraserDown ? '#ff6b6b' : 'rgba(255, 107, 107, 0.55)';
+    ctx.strokeRect(-ERASER_SIZE / 2, -ERASER_SIZE / 2, ERASER_SIZE, ERASER_SIZE);
+  }
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
 function drawSnapPoint(sp, alpha = 1) {
   const r = 3.5 / state.zoom;
   ctx.beginPath();
@@ -1509,11 +1565,15 @@ function render() {
   drawGrid();
   drawGuides();
 
+  drawHatches();
+
   for (const shape of state.shapes) {
     const selected = state.selectedIds.has(shape.id);
     drawShape(shape, false, selected);
     if (selected) drawSnapPoints(shape);
   }
+
+  drawBrushPreview();
 
   if ((state.isDraggingShapes || state.isDraggingGuide || state.isCarrying) && state.dragSnapTarget) {
     const t = state.dragSnapTarget;
@@ -1763,7 +1823,11 @@ function setTool(tool) {
   cancelPlacement();
   endShapeDrag();
   state.isDraggingGuide = false;
-  workspace.style.cursor = '';
+  state.brushAngleKey = null;
+  state.brushLast = null;
+  state.eraserDown = false;
+  state.eraserLast = null;
+  workspace.style.cursor = (tool === 'brush' || tool === 'eraser') ? 'none' : '';
   state.tool = tool;
   document.querySelectorAll('.tool').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.tool === tool);
@@ -1813,6 +1877,21 @@ function updateStatus() {
     } else {
       statusEl.textContent = 'Protractor · click grid or vertex';
     }
+    return;
+  }
+  if (state.tool === 'brush') {
+    if (state.brushAngleKey) {
+      const deg = Math.round((HATCH_ANGLES[state.brushAngleKey] * 180) / Math.PI);
+      statusEl.textContent = `Hatch ${deg}° · move to paint · release to lift`;
+    } else {
+      statusEl.textContent = 'Brush · hold 1 / 2 / 3 / 4 to hatch · trackpad moves';
+    }
+    return;
+  }
+  if (state.tool === 'eraser') {
+    statusEl.textContent = state.eraserDown
+      ? 'Erasing · move to wipe hatches'
+      : 'Eraser · hold 1–4 and move to wipe hatches';
     return;
   }
   if (isSegmentTool()) {
@@ -1929,6 +2008,123 @@ function getPointerPos(e) {
   return screenToWorld(e.clientX, e.clientY);
 }
 
+// ─── Brush / cross-hatch ────────────────────────────────────────────────────────
+// Stamp one brush footprint at (cx, cy): fill the rectangle (perpendicular to the
+// hatch) with parallel marks snapped to the angle's lattice, de-duped via hatchKeySet.
+function stampHatch(cx, cy, ang) {
+  const ux = Math.cos(ang), uy = Math.sin(ang);   // along the hatch line
+  const nx = -Math.sin(ang), ny = Math.cos(ang);  // perpendicular (across lines)
+  const along0 = cx * ux + cy * uy;
+  const off0 = cx * nx + cy * ny;
+  const aIdx = HATCH_ANGLE_IDX[brushKeyFor(ang)] ?? 0;
+  const liMin = Math.round((off0 - BRUSH_LEN / 2) / HATCH_SPACING);
+  const liMax = Math.round((off0 + BRUSH_LEN / 2) / HATCH_SPACING);
+  const ciMin = Math.round((along0 - BRUSH_THICK / 2) / HATCH_CELL);
+  const ciMax = Math.round((along0 + BRUSH_THICK / 2) / HATCH_CELL);
+  const hx = (HATCH_CELL / 2) * ux, hy = (HATCH_CELL / 2) * uy;
+  for (let li = liMin; li <= liMax; li++) {
+    const off = li * HATCH_SPACING;
+    for (let ci = ciMin; ci <= ciMax; ci++) {
+      const key = `${aIdx}:${li}:${ci}`;
+      if (state.hatchKeySet.has(key)) continue;
+      const along = ci * HATCH_CELL;
+      const ctrx = along * ux + off * nx;
+      const ctry = along * uy + off * ny;
+      state.hatchKeySet.add(key);
+      state.hatches.push({ key, x1: ctrx - hx, y1: ctry - hy, x2: ctrx + hx, y2: ctry + hy });
+    }
+  }
+}
+
+function brushKeyFor(ang) {
+  for (const k in HATCH_ANGLES) if (HATCH_ANGLES[k] === ang) return k;
+  return '1';
+}
+
+// Stamp continuously along the pointer path so fast trackpad moves leave no gaps.
+function stampStroke(from, to, ang) {
+  const dx = to.x - from.x, dy = to.y - from.y;
+  const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / BRUSH_STEP));
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    stampHatch(from.x + dx * t, from.y + dy * t, ang);
+  }
+}
+
+// Remove every hatch mark whose midpoint falls inside the eraser square at p.
+function eraseAt(p) {
+  const r = ERASER_SIZE / 2;
+  state.hatches = state.hatches.filter(h => {
+    const mx = (h.x1 + h.x2) / 2, my = (h.y1 + h.y2) / 2;
+    const hit = Math.abs(mx - p.x) <= r && Math.abs(my - p.y) <= r;
+    if (hit) state.hatchKeySet.delete(h.key);
+    return !hit;
+  });
+}
+
+function eraseStroke(from, to) {
+  const dx = to.x - from.x, dy = to.y - from.y;
+  const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / BRUSH_STEP));
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    eraseAt({ x: from.x + dx * t, y: from.y + dy * t });
+  }
+}
+
+// Pointer hover while the brush/eraser is active. The trackpad only moves the tool;
+// painting happens only while a key is held (brushAngleKey / eraserDown).
+function handleBrushMove(raw) {
+  state._hoverWorld = raw;
+  if (state.tool === 'brush' && state.brushAngleKey) {
+    stampStroke(state.brushLast || raw, raw, HATCH_ANGLES[state.brushAngleKey]);
+    state.brushLast = raw;
+  } else if (state.tool === 'eraser' && state.eraserDown) {
+    eraseStroke(state.eraserLast || raw, raw);
+    state.eraserLast = raw;
+  }
+  crosshair.hidden = true;
+  snapIndicator.hidden = true;
+  updateStatus();
+  render();
+}
+
+// Key down for 1–4 while the brush/eraser tool is active: press the pen to paper.
+function handleBrushKeyDown(e) {
+  if (!(e.key in HATCH_ANGLES)) return false;   // note: key '1' maps to angle 0 (falsy)
+  if (e.repeat) return true;
+  const c = state._hoverWorld;
+  if (state.tool === 'brush') {
+    state.brushAngleKey = e.key;
+    state.brushAngle = HATCH_ANGLES[e.key];
+    if (c) { state.brushLast = c; stampHatch(c.x, c.y, HATCH_ANGLES[e.key]); }
+  } else {
+    state.eraserDown = true;
+    if (c) { state.eraserLast = c; eraseAt(c); }
+  }
+  updateStatus();
+  render();
+  return true;
+}
+
+function handleBrushKeyUp(e) {
+  if (!(e.key in HATCH_ANGLES)) return;
+  if (state.tool === 'brush' && state.brushAngleKey === e.key) {
+    state.brushAngleKey = null;
+    state.brushLast = null;
+    updateStatus();
+    render();
+  } else if (state.tool === 'eraser') {
+    state.eraserDown = false;
+    state.eraserLast = null;
+    updateStatus();
+    render();
+  }
+}
+
+function isBrushTool() {
+  return state.tool === 'brush' || state.tool === 'eraser';
+}
+
 function handleSegmentClick(crossing) {
   if (!crossing) return;
   if (!state.segmentStart) {
@@ -1965,6 +2161,9 @@ function onPointerDown(e) {
     commitMove();
     return;
   }
+
+  // Brush/eraser ignore clicks entirely — the trackpad moves them, keys deposit.
+  if (isBrushTool()) return;
 
   if (isSegmentTool()) {
     handleSegmentClick(snapSegmentPoint(raw));
@@ -2046,6 +2245,8 @@ function onPointerMove(e) {
   }
 
   const raw = getPointerPos(e);
+
+  if (isBrushTool()) { handleBrushMove(raw); return; }
 
   if (state.isDraggingShapes || state.isCarrying) {
     updateShapeMove(raw);
@@ -2175,6 +2376,7 @@ function onWheel(e) {
 
 const TOOL_KEYS = {
   v: 'select', p: 'stroke', l: 'line', t: 'protractor', s: 'square', e: 'ellipse', c: 'circle',
+  b: 'brush', x: 'eraser',
 };
 
 function onKeyDown(e) {
@@ -2188,6 +2390,9 @@ function onKeyDown(e) {
 
   // Typed X/Y/ΔX/ΔY while carrying a picked-up object.
   if (state.isCarrying && handleMoveKey(e)) return;
+
+  // Brush/eraser: 1–4 press the pen/eraser to paper.
+  if (isBrushTool() && handleBrushKeyDown(e)) return;
 
   if (e.key.toLowerCase() === 'o') { toggleOrigin(); return; }
 
@@ -2221,6 +2426,10 @@ function onKeyDown(e) {
     state.selectedIds.clear();
     state.segmentStart = null;
     state.segmentHover = null;
+    state.brushAngleKey = null;
+    state.brushLast = null;
+    state.eraserDown = false;
+    state.eraserLast = null;
     cancelPlacement();
     state.isMarquee = false;
     state.marqueeStart = null;
@@ -2240,6 +2449,7 @@ function onKeyUp(e) {
   }
   if (e.key === 'Shift') state._shiftHeld = false;
 
+  if (isBrushTool()) handleBrushKeyUp(e);
 }
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
