@@ -1,0 +1,17 @@
+duckdb>=1.0.0
+numpy>=1.24.0
+PyYAML>=6.0
+mutagen>=1.47.0
+
+# Stem separation (CPU ok; GPU faster)
+torch>=2.0.0
+demucs>=4.0.0
+
+# Tagging fallback (AudioSet labels) — recommended default
+panns-inference>=0.1.0
+librosa>=0.10.0
+
+# Optional: Essentia + TensorFlow for FSD-SINet tagger
+# Install via conda is most reliable:
+#   conda install -c conda-forge essentia-tensorflow
+# essentia>=2.1b6

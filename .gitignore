@@ -2,3 +2,10 @@
 *.swp
 *.swo
 *~
+
+# Audio catalog runtime artifacts
+audio_catalog/manifest.duckdb
+audio_catalog/manifest.duckdb.wal
+audio_catalog/models/
+audio-catalog-repo/
+.venv-audio/

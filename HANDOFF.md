@@ -33,11 +33,11 @@ Or open `index.html` directly in a browser (`<script src="app.js">`, not `type="
 
 | Key | Tool | Interaction |
 |-----|------|-------------|
-| `V` | Select | Click shape; drag marquee; Shift toggles multi-select |
+| `V` | Select & move | Click shape; **drag to move** (live X/Y + ΔX/ΔY readout, snaps to guides/objects/grid); **click an already-selected shape to “pick it up”** — no-button move, type X/Y or ΔX/ΔY (`Tab` switches field), click or `Enter` to drop, `Esc` cancels. Drag marquee on empty; Shift toggles multi-select |
 | `P` | Stroke | Click two guide crossings on the same guide |
 | `L` | Line | Same as stroke (straight segment primitive) |
 | `T` | Protractor | Click grid/vertex → scroll/drag rotate (15°) → click place angled guide |
-| — | Rect / Square / Ellipse / Circle | Click-drag; optional “from center” toggle |
+| — | Rect / Square / Ellipse / Circle | Click first corner → move to size → type exact dims (Tab switches W/H) → click or `Enter` to commit. Live W/H (S / ⌀) dimensions shown; `Esc` cancels; “from center” toggle |
 | `Space` + drag | Pan | Middle-click also pans |
 | Pinch / scroll | Zoom | Trackpad scroll pans when not in protractor rotate |
 | `Shift` + ruler click | — | Remove nearest H/V guide |

@@ -1,0 +1,8 @@
+manifest.duckdb
+manifest.duckdb.wal
+audio_catalog/models/
+.venv/
+.venv-audio/
+__pycache__/
+*.pyc
+.DS_Store
