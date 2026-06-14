@@ -1,6 +1,19 @@
 // ─── Config ───────────────────────────────────────────────────────────────────
-const GRID_SIZE = 20;
+let GRID_SIZE = 20;           // grid pitch in world px — mutable via the grid panel (g g)
+const MIN_GRID = 2;           // smallest allowed grid pitch (world px)
 const RULER_SIZE = 28;
+
+// ─── Units ──────────────────────────────────────────────────────────────────────
+// World coordinates are pixels. 100 world px = 1 inch defines the physical scale, so
+// imperial (thous = 0.001 in) and metric (mm) just re-express the same world length.
+// `factor` is world px per 1 display unit; `decimals` controls display precision.
+const PX_PER_INCH = 100;
+const UNITS = {
+  px:   { label: 'px',   factor: 1,                   decimals: 2 },
+  thou: { label: 'thou', factor: PX_PER_INCH / 1000,  decimals: 0 },
+  mm:   { label: 'mm',   factor: PX_PER_INCH / 25.4,  decimals: 2 },
+};
+const G_DOUBLE_MS = 500;      // window for the g-g double-press to open the grid panel
 const SNAP_RADIUS = 10;
 const CROSSING_RADIUS = 12;
 const PROTRACTOR_STEP_DEG = 15;
@@ -11,6 +24,9 @@ const DIM_ARROW = 9;          // arrowhead length, screen px
 const DIM_LABEL_OFFSET = 12;  // label offset off the dimension line, screen px
 
 // ─── Brush / cross-hatch ────────────────────────────────────────────────────────
+// Hatch painting (brush + eraser) is disabled for now. Flip to true to restore the
+// tools, their toolbar buttons (#hatch-tools), and the 'b'/'x' shortcuts.
+const HATCH_ENABLED = false;
 // Hatch keys pick the angle of the parallel lines; the brush rectangle is oriented
 // perpendicular to them. Marks live on a per-angle lattice (intrinsic to the hatch,
 // independent of the document grid) so repeated passes stay clean and de-duplicate.
@@ -23,12 +39,19 @@ const BRUSH_THICK = 20;    // brush extent along the hatch (length laid down per
 const BRUSH_STEP = 5;      // path interpolation step while dragging (world px)
 const ERASER_SIZE = 30;    // eraser square footprint (world px)
 
+// ─── Text annotations ───────────────────────────────────────────────────────────
+const TEXT_SIZE = 14;   // font size (world px)
+const TEXT_LINE = 18;   // line height (world px)
+const TEXT_PAD = 5;     // padding inside the text box (world px)
+const TEXT_FONT = 'IBM Plex Mono, monospace';
+
 // ─── State ────────────────────────────────────────────────────────────────────
 const state = {
   tool: 'select',
   shapes: [],
   selectedIds: new Set(),
   selectedGuide: null,       // { type:'h'|'v', value } | { type:'angle'|'vertex', ref }
+  textEditing: null,         // { id, vertexAnchor } while a text item is being edited
   isDraggingShapes: false,
   isDraggingGuide: false,
   isCarrying: false,         // no-button "pick up" move (after clicking a selected shape)
@@ -54,8 +77,12 @@ const state = {
   snapGrid: true,
   snapObject: true,
   drawFromCenter: false,
+  unit: 'px',                // active display unit: 'px' | 'thou' | 'mm'
+  gridPanelOpen: false,      // grid/snap popover visibility (g g)
+  _lastGPress: -1,           // timestamp of last bare 'g' keydown (double-press detect)
   originCorner: 'top-left',  // 'top-left' | 'bottom-left' — dimension reference corner
   dimEntry: null,            // raw typed string while entering an exact guide dimension
+  dimEntryReplace: false,    // true when dimEntry is seeded (guide edit) — first keystroke replaces
   panX: 0,
   panY: 0,
   zoom: 1,
@@ -91,6 +118,13 @@ const statusEl = document.getElementById('status');
 const snapGridToggle = document.getElementById('snap-grid');
 const snapObjectToggle = document.getElementById('snap-object');
 const drawCenterToggle = document.getElementById('draw-center');
+const gridPanel = document.getElementById('grid-panel');
+const unitSelect = document.getElementById('unit-select');
+const gridSizeInput = document.getElementById('grid-size-input');
+const gridSizeUnit = document.getElementById('grid-size-unit');
+const panelSnapGrid = document.getElementById('panel-snap-grid');
+const panelSnapObject = document.getElementById('panel-snap-object');
+const unitLabelBtn = document.getElementById('unit-label');
 
 let nextId = 1;
 
@@ -132,14 +166,22 @@ function snapGuideValue(v) {
   return Math.round(v / GRID_SIZE) * GRID_SIZE;
 }
 
-function worldYFromClientY(clientY) {
+function rawWorldYFromClientY(clientY) {
   const rect = canvas.getBoundingClientRect();
-  return snapGuideValue((clientY - rect.top - state.panY) / state.zoom);
+  return (clientY - rect.top - state.panY) / state.zoom;
+}
+
+function rawWorldXFromClientX(clientX) {
+  const rect = canvas.getBoundingClientRect();
+  return (clientX - rect.left - RULER_SIZE - state.panX) / state.zoom;
+}
+
+function worldYFromClientY(clientY) {
+  return snapGuideValue(rawWorldYFromClientY(clientY));
 }
 
 function worldXFromClientX(clientX) {
-  const rect = canvas.getBoundingClientRect();
-  return snapGuideValue((clientX - rect.left - RULER_SIZE - state.panX) / state.zoom);
+  return snapGuideValue(rawWorldXFromClientX(clientX));
 }
 
 // ─── Guides & crossings ───────────────────────────────────────────────────────
@@ -253,6 +295,17 @@ function removeNearestGuide(axis, value) {
     if (d < bestDist) { best = v; bestDist = d; }
   }
   if (bestDist <= GRID_SIZE / 2) removeGuide(axis, best);
+}
+
+// Nearest existing guide value within `tol` world px of a raw ruler position, or null.
+function nearestGuideValue(axis, value, tol) {
+  const arr = axis === 'h' ? state.guidesH : state.guidesV;
+  let best = null, bestDist = tol;
+  for (const v of arr) {
+    const d = Math.abs(v - value);
+    if (d <= bestDist) { bestDist = d; best = v; }
+  }
+  return best;
 }
 
 function nearestCrossing(worldPt) {
@@ -436,22 +489,36 @@ function placeProtractorGuide() {
 }
 
 // ─── Dimensions ───────────────────────────────────────────────────────────────
-// Guide axes: 'h' guide carries a world-Y value; 'v' guide carries a world-X value.
+// Two boundaries are crossed when showing a measurement: origin (sign of the Y axis)
+// and unit (world px ⟷ display unit). worldToDim/dimToWorld handle both and are exact
+// inverses, so a typed value round-trips back to the same world coordinate.
 // X is always measured rightward from the left edge (both origin corners are "left"),
 // so the origin swap only flips the sign of the Y measurement.
+function unitDef() { return UNITS[state.unit] || UNITS.px; }
+function unitLabel() { return unitDef().label; }
+function pxToUnit(px) { return px / unitDef().factor; }
+function unitToPx(v) { return v * unitDef().factor; }
+
 function worldToDim(axis, worldVal) {
-  if (axis === 'v') return worldVal;
-  return state.originCorner === 'bottom-left' ? -worldVal : worldVal;
+  const signed = axis === 'v' ? worldVal : (state.originCorner === 'bottom-left' ? -worldVal : worldVal);
+  return pxToUnit(signed);
 }
 
 function dimToWorld(axis, dimVal) {
-  if (axis === 'v') return dimVal;
-  return state.originCorner === 'bottom-left' ? -dimVal : dimVal;
+  const px = unitToPx(dimVal);
+  if (axis === 'v') return px;
+  return state.originCorner === 'bottom-left' ? -px : px;
 }
 
+// Formats a number already expressed in display units (no unit suffix).
 function formatDim(v) {
-  return String(Math.round(v * 100) / 100); // integers plain, else up to 2 decimals
+  const d = unitDef().decimals;
+  const p = Math.pow(10, d);
+  return String(Math.round(v * p) / p);
 }
+
+// Convenience: format a raw world-px length into the active display unit.
+function fmtLen(px) { return formatDim(pxToUnit(px)); }
 
 function setOrigin(corner) {
   state.originCorner = corner;
@@ -463,6 +530,58 @@ function setOrigin(corner) {
 
 function toggleOrigin() {
   setOrigin(state.originCorner === 'top-left' ? 'bottom-left' : 'top-left');
+}
+
+// ─── Units, grid & snap controls ─────────────────────────────────────────────────
+// One source of truth in state; syncControls() pushes it to every DOM control so the
+// toolbar toggles and the grid panel never drift apart.
+function syncControls(refreshGridInput = true) {
+  if (snapGridToggle) snapGridToggle.checked = state.snapGrid;
+  if (snapObjectToggle) snapObjectToggle.checked = state.snapObject;
+  if (panelSnapGrid) panelSnapGrid.checked = state.snapGrid;
+  if (panelSnapObject) panelSnapObject.checked = state.snapObject;
+  if (unitSelect) unitSelect.value = state.unit;
+  if (gridSizeUnit) gridSizeUnit.textContent = unitLabel();
+  if (unitLabelBtn) unitLabelBtn.textContent = `Grid · ${unitLabel()}`;
+  // Skip the field only when the user is actively typing into it (refreshGridInput
+  // false); a unit change must rewrite it even while focused, since its value changed.
+  if (gridSizeInput && refreshGridInput) {
+    gridSizeInput.value = formatDim(pxToUnit(GRID_SIZE));
+  }
+}
+
+function setUnit(u) {
+  if (!UNITS[u]) return;
+  state.unit = u;
+  syncControls();
+  updateStatus();
+  render();
+}
+
+function setGridSize(px, refreshGridInput = true) {
+  if (!Number.isFinite(px)) return;
+  GRID_SIZE = Math.max(MIN_GRID, px);
+  syncControls(refreshGridInput);
+  render();
+}
+
+function setSnapGrid(v) { state.snapGrid = v; syncControls(); render(); }
+function setSnapObject(v) { state.snapObject = v; syncControls(); render(); }
+
+function openGridPanel() {
+  state.gridPanelOpen = true;
+  if (gridPanel) gridPanel.hidden = false;
+  syncControls();
+  if (gridSizeInput) { gridSizeInput.focus({ preventScroll: true }); gridSizeInput.select(); }
+}
+
+function closeGridPanel() {
+  state.gridPanelOpen = false;
+  if (gridPanel) gridPanel.hidden = true;
+}
+
+function toggleGridPanel() {
+  state.gridPanelOpen ? closeGridPanel() : openGridPanel();
 }
 
 // Exact dimension entry — active whenever a ruler preview guide is showing.
@@ -478,6 +597,7 @@ function applyDimEntry() {
 
 function appendDim(ch) {
   let s = state.dimEntry ?? '';
+  if (state.dimEntryReplace) { s = ''; state.dimEntryReplace = false; } // seeded value: type fresh
   if (ch === '-') s = s.startsWith('-') ? s.slice(1) : '-' + s; // toggle sign
   else if (ch === '.' && s.includes('.')) return;               // one decimal point
   else s += ch;
@@ -487,6 +607,7 @@ function appendDim(ch) {
 
 function backspaceDim() {
   if (state.dimEntry === null) return;
+  state.dimEntryReplace = false; // start editing the seeded value in place
   state.dimEntry = state.dimEntry.slice(0, -1) || null;
   applyDimEntry();
 }
@@ -495,12 +616,18 @@ function commitDim() {
   if (!state.previewGuide) return;
   addGuide(state.previewGuide.axis, state.previewGuide.value); // exact, not grid-snapped
   state.dimEntry = null;
+  state.dimEntryReplace = false;
   updateStatus();
   render();
 }
 
 function cancelDim() {
+  // Editing an existing guide that was lifted out on pickup: restore it on cancel.
+  if (state.dimEntryReplace && state.previewGuide) {
+    addGuide(state.previewGuide.axis, state.previewGuide.value);
+  }
   state.dimEntry = null;
+  state.dimEntryReplace = false;
   updateStatus();
   render();
 }
@@ -585,7 +712,7 @@ function drawDimensions() {
   ctx.fill();
 
   const dimVal = state.dimEntry !== null ? (state.dimEntry || '0') : formatDim(worldToDim(axis, value));
-  drawDimLabel((ax + bx) / 2, (ay + by) / 2, axis, `${dimVal} px`);
+  drawDimLabel((ax + bx) / 2, (ay + by) / 2, axis, `${dimVal} ${unitLabel()}`);
 
   ctx.restore();
 }
@@ -613,6 +740,11 @@ function getShapeBounds(shape) {
     return { left: minX, top: minY, right: maxX, bottom: maxY };
   }
 
+  if (type === 'text') {
+    const m = measureTextShape(shape);
+    return { left: x, top: y, right: x + m.w + TEXT_PAD * 2, bottom: y + m.h + TEXT_PAD * 2 };
+  }
+
   return {
     left: Math.min(x, x2),
     top: Math.min(y, y2),
@@ -624,6 +756,13 @@ function getShapeBounds(shape) {
 function getShapeSnapPoints(shape) {
   const pts = [];
   const { type, x, y, x2, y2, points } = shape;
+
+  if (type === 'text') {
+    const b = getShapeBounds(shape);
+    pts.push({ x, y, kind: 'vertex' });
+    pts.push({ x: (b.left + b.right) / 2, y: (b.top + b.bottom) / 2, kind: 'center' });
+    return pts;
+  }
 
   if ((type === 'stroke' || type === 'pencil') && points?.length) {
     pts.push({ x: points[0].x, y: points[0].y, kind: 'vertex' });
@@ -721,7 +860,7 @@ function drawFields() {
 function drawLockedValues() {
   const v = {};
   const typed = state.drawEntry?.typed || {};
-  for (const k in typed) { const n = parseFloat(typed[k]); if (Number.isFinite(n)) v[k] = n; }
+  for (const k in typed) { const n = parseFloat(typed[k]); if (Number.isFinite(n)) v[k] = unitToPx(n); }
   return v;
 }
 
@@ -774,6 +913,11 @@ function hitTest(shape, wx, wy) {
   }
 
   if (type === 'line') return pointToSegmentDist(wx, wy, x, y, x2, y2) < tol;
+
+  if (type === 'text') {
+    const tb = getShapeBounds(shape);
+    return wx >= tb.left - tol && wx <= tb.right + tol && wy >= tb.top - tol && wy <= tb.bottom + tol;
+  }
 
   const b = getShapeBounds(shape);
 
@@ -869,6 +1013,7 @@ function deleteSelectedGuide() {
 
 function cloneGeom(s) {
   if (s.points) return { points: s.points.map(p => ({ x: p.x, y: p.y })) };
+  if (s.type === 'text') return { x: s.x, y: s.y };
   return { x: s.x, y: s.y, x2: s.x2, y2: s.y2 };
 }
 
@@ -877,7 +1022,7 @@ function translateShapeFrom(shape, orig, dx, dy) {
     shape.points = orig.points.map(p => ({ x: p.x + dx, y: p.y + dy }));
   } else {
     shape.x = orig.x + dx; shape.y = orig.y + dy;
-    shape.x2 = orig.x2 + dx; shape.y2 = orig.y2 + dy;
+    if (orig.x2 !== undefined) { shape.x2 = orig.x2 + dx; shape.y2 = orig.y2 + dy; }
   }
 }
 
@@ -894,6 +1039,13 @@ function beginShapeDrag(raw, primaryId, pointerId) {
   state.dragOriginals = new Map();
   for (const s of state.shapes) {
     if (state.selectedIds.has(s.id)) state.dragOriginals.set(s.id, cloneGeom(s));
+  }
+  // Attached text travels with its parent shape even when not itself selected.
+  for (const s of state.shapes) {
+    if (s.type === 'text' && s.attachTo != null &&
+        state.selectedIds.has(s.attachTo) && !state.dragOriginals.has(s.id)) {
+      state.dragOriginals.set(s.id, cloneGeom(s));
+    }
   }
   canvas.setPointerCapture(pointerId);
 }
@@ -1056,9 +1208,9 @@ function resolveMoveLocks() {
   const topLeft = state.originCorner === 'top-left';
   const num = (s) => { const n = parseFloat(s); return Number.isFinite(n) ? n : null; };
   let dx = null, dy = null;
-  if (t.dx) dx = num(t.dx);
-  else if (t.x && bb) { const n = num(t.x); if (n !== null) dx = n - bb.left; }
-  if (t.dy) { const n = num(t.dy); if (n !== null) dy = topLeft ? n : -n; }
+  if (t.dx) { const n = num(t.dx); if (n !== null) dx = unitToPx(n); }
+  else if (t.x && bb) { const n = num(t.x); if (n !== null) dx = unitToPx(n) - bb.left; }
+  if (t.dy) { const n = num(t.dy); if (n !== null) dy = unitToPx(topLeft ? n : -n); }
   else if (t.y && bb) { const n = num(t.y); if (n !== null) dy = dimToWorld('h', n) - (topLeft ? bb.top : bb.bottom); }
   return { dx, dy };
 }
@@ -1162,10 +1314,10 @@ function moveReadout() {
   const off = state.moveOffset || { dx: 0, dy: 0 };
   const topLeft = state.originCorner === 'top-left';
   return {
-    x: bb.left + off.dx,
+    x: pxToUnit(bb.left + off.dx),
     y: worldToDim('h', (topLeft ? bb.top : bb.bottom) + off.dy),
-    dx: off.dx,
-    dy: topLeft ? off.dy : -off.dy,
+    dx: pxToUnit(off.dx),
+    dy: pxToUnit(topLeft ? off.dy : -off.dy),
   };
 }
 
@@ -1353,6 +1505,8 @@ function drawSegmentPreview() {
 function drawShape(shape, isPreview = false, isSelected = false) {
   const { type, x, y, x2, y2, points } = shape;
 
+  if (type === 'text') { drawTextShape(shape, isSelected); return; }
+
   ctx.lineWidth = (isSelected ? 2 : 1.5) / state.zoom;
   ctx.strokeStyle = isSelected ? '#f0a030' : isPreview ? 'rgba(240, 160, 48, 0.7)' : '#e8eaed';
   ctx.fillStyle = isSelected ? 'rgba(240, 160, 48, 0.08)' : 'rgba(232, 234, 237, 0.04)';
@@ -1504,7 +1658,7 @@ function drawRulers() {
     if (tickStep >= 10 && y % (GRID_SIZE * 5) === 0) {
       ctx.textAlign = 'right';
       ctx.textBaseline = 'middle';
-      ctx.fillText(String(y), RULER_SIZE - 10, sy);
+      ctx.fillText(formatDim(worldToDim('h', y)), RULER_SIZE - 10, sy);
     }
   }
 
@@ -1520,9 +1674,11 @@ function drawRulers() {
     if (tickStep >= 10 && x % (GRID_SIZE * 5) === 0) {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
-      ctx.fillText(String(x), sx, by + 12);
+      ctx.fillText(formatDim(worldToDim('v', x)), sx, by + 12);
     }
   }
+
+  drawGuideBaseLabels(fullW, fullH);
 
   if (state.previewGuide) {
     ctx.strokeStyle = 'rgba(240, 160, 48, 0.95)';
@@ -1543,6 +1699,51 @@ function drawRulers() {
   }
 
   ctx.restore();
+}
+
+// Position-value chips at each guide's base on its ruler. Clicking one is just a
+// ruler click on that guide, so it routes through handleRulerDown's edit path.
+function drawGuideBaseLabels(fullW, fullH) {
+  const sel = state.selectedGuide;
+  ctx.font = '9px IBM Plex Mono, monospace';
+  const bottom = fullH - RULER_SIZE;
+
+  // Horizontal guides → left ruler, labelled by their world-Y position.
+  for (const yv of state.guidesH) {
+    const sy = yv * state.zoom + state.panY;
+    if (sy < 6 || sy > bottom - 6) continue;
+    const active = sel && sel.type === 'h' && sel.value === yv;
+    drawRulerGuideChip('h', RULER_SIZE, sy, formatDim(worldToDim('h', yv)), active);
+  }
+  // Vertical guides → bottom ruler, labelled by their world-X position.
+  for (const xv of state.guidesV) {
+    const sx = xv * state.zoom + state.panX + RULER_SIZE;
+    if (sx < RULER_SIZE + 6 || sx > fullW - 6) continue;
+    const active = sel && sel.type === 'v' && sel.value === xv;
+    drawRulerGuideChip('v', sx, bottom, formatDim(worldToDim('v', xv)), active);
+  }
+}
+
+function drawRulerGuideChip(axis, x, y, text, active) {
+  const tw = ctx.measureText(text).width;
+  const padX = 3, hChip = 12;
+  ctx.fillStyle = active ? 'rgba(240, 160, 48, 0.95)' : 'rgba(78, 205, 196, 0.92)';
+  if (axis === 'h') {
+    // Right-aligned against the ruler/canvas seam on the vertical ruler.
+    const right = x - 1;
+    ctx.fillRect(right - tw - padX * 2, y - hChip / 2, tw + padX * 2, hChip);
+    ctx.fillStyle = '#0e0f11';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, right - padX, y + 0.5);
+  } else {
+    // Top-aligned against the ruler/canvas seam on the bottom ruler.
+    ctx.fillRect(x - tw / 2 - padX, y + 1, tw + padX * 2, hChip);
+    ctx.fillStyle = '#0e0f11';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, x, y + 1 + hChip / 2 + 0.5);
+  }
 }
 
 function render() {
@@ -1673,7 +1874,7 @@ function fieldText(key, value) {
   const fields = drawFields();
   const active = fields[state.drawEntry?.active ?? 0] === key;
   const typed = state.drawEntry?.typed?.[key] ?? '';
-  const shown = typed !== '' ? typed : formatDim(value);
+  const shown = typed !== '' ? typed : fmtLen(value);
   return { shown, active };
 }
 
@@ -1816,6 +2017,8 @@ function finalizeMarquee() {
 
 // ─── UI ───────────────────────────────────────────────────────────────────────
 function setTool(tool) {
+  if (!HATCH_ENABLED && (tool === 'brush' || tool === 'eraser')) tool = 'select';
+  if (state.textEditing) commitText();
   if (tool !== 'protractor') resetProtractor();
   state.segmentStart = null;
   state.segmentHover = null;
@@ -1827,7 +2030,7 @@ function setTool(tool) {
   state.brushLast = null;
   state.eraserDown = false;
   state.eraserLast = null;
-  workspace.style.cursor = (tool === 'brush' || tool === 'eraser') ? 'none' : '';
+  workspace.style.cursor = (tool === 'brush' || tool === 'eraser') ? 'none' : (tool === 'text' ? 'text' : '');
   state.tool = tool;
   document.querySelectorAll('.tool').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.tool === tool);
@@ -1839,10 +2042,14 @@ function setTool(tool) {
 }
 
 function updateStatus() {
+  if (state.textEditing) {
+    statusEl.textContent = 'Type · Enter commit · Shift+Enter newline · Esc cancel';
+    return;
+  }
   if (state.isDraggingShapes || state.isCarrying) {
     const r = moveReadout();
     if (r) {
-      let s = `X ${formatDim(r.x)} · Y ${formatDim(r.y)} · ΔX ${signFmt(r.dx)} · ΔY ${signFmt(r.dy)} px`;
+      let s = `X ${formatDim(r.x)} · Y ${formatDim(r.y)} · ΔX ${signFmt(r.dx)} · ΔY ${signFmt(r.dy)} ${unitLabel()}`;
       if (state.isCarrying) s += ' · type / Tab · click or Enter';
       statusEl.textContent = s;
       return;
@@ -1852,9 +2059,9 @@ function updateStatus() {
     const { axis, value } = state.previewGuide;
     const dim = formatDim(worldToDim(axis, value));
     if (state.dimEntry !== null) {
-      statusEl.textContent = `${state.dimEntry || '0'} px · Enter to place`;
+      statusEl.textContent = `${state.dimEntry || '0'} ${unitLabel()} · Enter to place`;
     } else {
-      statusEl.textContent = `${axis === 'h' ? 'Y' : 'X'} ${dim} px · type for exact`;
+      statusEl.textContent = `${axis === 'h' ? 'Y' : 'X'} ${dim} ${unitLabel()} · type for exact`;
     }
     return;
   }
@@ -1864,9 +2071,9 @@ function updateStatus() {
       const W = Math.abs(p.x2 - p.x), H = Math.abs(p.y2 - p.y);
       const fields = drawFields();
       const parts = fields.map(k => k === 'd'
-        ? `⌀ ${formatDim(Math.min(W, H))}`
-        : `${FIELD_LABEL[k]} ${formatDim(k === 'h' ? H : W)}`);
-      statusEl.textContent = `${parts.join(' · ')} px · type / Tab · click or Enter`;
+        ? `⌀ ${fmtLen(Math.min(W, H))}`
+        : `${FIELD_LABEL[k]} ${fmtLen(k === 'h' ? H : W)}`);
+      statusEl.textContent = `${parts.join(' · ')} ${unitLabel()} · type / Tab · click or Enter`;
       return;
     }
   }
@@ -1904,6 +2111,10 @@ function updateStatus() {
     }
     return;
   }
+  if (state.tool === 'text') {
+    statusEl.textContent = 'Text · click empty to place · click a shape to attach · Tab on a selection';
+    return;
+  }
   statusEl.textContent = state.tool.charAt(0).toUpperCase() + state.tool.slice(1);
 }
 
@@ -1928,7 +2139,7 @@ function updateOverlays(clientX, clientY, snap) {
     if (!state.isDrawing && !state.isMarquee) updateStatus();
   }
 
-  if (state.tool !== 'select' && !state.isPanning && !isSegmentTool()) {
+  if (state.tool !== 'select' && state.tool !== 'text' && !state.isPanning && !isSegmentTool()) {
     const rect = canvas.getBoundingClientRect();
     crosshair.style.left = `${clientX - rect.left - RULER_SIZE}px`;
     crosshair.style.top = `${clientY - rect.top}px`;
@@ -1963,9 +2174,32 @@ function handleRulerMove(axis, clientPos, shiftKey) {
 
 function handleRulerDown(axis, clientPos, shiftKey) {
   state.dimEntry = null;
-  const value = axis === 'h' ? worldYFromClientY(clientPos) : worldXFromClientX(clientPos);
-  if (shiftKey) removeNearestGuide(axis, value);
-  else addGuide(axis, value);
+  state.dimEntryReplace = false;
+  const raw = axis === 'h' ? rawWorldYFromClientY(clientPos) : rawWorldXFromClientX(clientPos);
+
+  if (shiftKey) {
+    removeNearestGuide(axis, raw);
+    state.previewGuide = { axis, value: snapGuideValue(raw) };
+    updateStatus();
+    render();
+    return;
+  }
+
+  // Clicking on (or very near) an existing guide picks it up for editing: lift it out
+  // and seed the exact-entry buffer with its current value so it can be retyped.
+  const hit = nearestGuideValue(axis, raw, SNAP_RADIUS / state.zoom);
+  if (hit !== null) {
+    removeGuide(axis, hit);
+    state.previewGuide = { axis, value: hit };
+    state.dimEntry = formatDim(worldToDim(axis, hit));
+    state.dimEntryReplace = true; // show current value; first keystroke types fresh
+    updateStatus();
+    render();
+    return;
+  }
+
+  const value = snapGuideValue(raw);
+  addGuide(axis, value);
   state.previewGuide = { axis, value };
   updateStatus();
   render();
@@ -2122,7 +2356,154 @@ function handleBrushKeyUp(e) {
 }
 
 function isBrushTool() {
-  return state.tool === 'brush' || state.tool === 'eraser';
+  return HATCH_ENABLED && (state.tool === 'brush' || state.tool === 'eraser');
+}
+
+// ─── Text annotations ─────────────────────────────────────────────────────────
+// A text item is a shape ({ type:'text', x, y, text, attachTo }) so it reuses
+// select / move / marquee / delete. (x, y) is the box's top-left in world space.
+// When attachTo is set, the text rides along whenever its parent shape is moved
+// (see beginShapeDrag) and draws a faint leader to it.
+function textLines(shape) {
+  return String(shape.text ?? '').split('\n');
+}
+
+function measureTextShape(shape) {
+  ctx.font = `${TEXT_SIZE}px ${TEXT_FONT}`;
+  const lines = textLines(shape);
+  let maxW = TEXT_SIZE * 0.6; // keep an empty box clickable
+  for (const ln of lines) maxW = Math.max(maxW, ctx.measureText(ln).width);
+  return { w: maxW, h: Math.max(1, lines.length) * TEXT_LINE, lines };
+}
+
+function drawTextConnector(shape) {
+  const parent = state.shapes.find(s => s.id === shape.attachTo);
+  if (!parent) return;
+  const pb = getShapeBounds(parent);
+  const tb = getShapeBounds(shape);
+  ctx.beginPath();
+  ctx.moveTo((tb.left + tb.right) / 2, (tb.top + tb.bottom) / 2);
+  ctx.lineTo((pb.left + pb.right) / 2, (pb.top + pb.bottom) / 2);
+  ctx.strokeStyle = 'rgba(240, 160, 48, 0.3)';
+  ctx.lineWidth = 1 / state.zoom;
+  ctx.setLineDash([3 / state.zoom, 3 / state.zoom]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function drawTextShape(shape, isSelected) {
+  const editing = state.textEditing?.id === shape.id;
+  if (shape.attachTo != null) drawTextConnector(shape);
+
+  const m = measureTextShape(shape);
+  const boxW = m.w + TEXT_PAD * 2, boxH = m.h + TEXT_PAD * 2;
+
+  ctx.fillStyle = editing ? 'rgba(240, 160, 48, 0.12)' : 'rgba(14, 15, 17, 0.55)';
+  ctx.fillRect(shape.x, shape.y, boxW, boxH);
+
+  if (isSelected || editing) {
+    ctx.strokeStyle = editing ? '#f0a030' : 'rgba(240, 160, 48, 0.7)';
+    ctx.lineWidth = 1 / state.zoom;
+    ctx.setLineDash(editing ? [4 / state.zoom, 3 / state.zoom] : []);
+    ctx.strokeRect(shape.x, shape.y, boxW, boxH);
+    ctx.setLineDash([]);
+  }
+
+  ctx.font = `${TEXT_SIZE}px ${TEXT_FONT}`;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = (isSelected || editing) ? '#f0a030' : '#e8eaed';
+  for (let i = 0; i < m.lines.length; i++) {
+    ctx.fillText(m.lines[i], shape.x + TEXT_PAD, shape.y + TEXT_PAD + i * TEXT_LINE);
+  }
+
+  if (editing) {
+    const last = m.lines[m.lines.length - 1] ?? '';
+    const cx = shape.x + TEXT_PAD + ctx.measureText(last).width;
+    const cy = shape.y + TEXT_PAD + (m.lines.length - 1) * TEXT_LINE;
+    ctx.fillStyle = '#f0a030';
+    ctx.fillRect(cx + 1, cy, Math.max(1.5 / state.zoom, 1), TEXT_SIZE);
+  }
+}
+
+// Standalone text drops its own grid vertex (on commit); attached text links to a shape.
+function createStandaloneText(pt) {
+  const shape = { id: nextId++, type: 'text', x: pt.x, y: pt.y, text: '', attachTo: null };
+  state.shapes.push(shape);
+  state.selectedIds = new Set([shape.id]);
+  state.selectedGuide = null;
+  state.textEditing = { id: shape.id, vertexAnchor: { x: pt.x, y: pt.y } };
+  workspace.focus();
+  updateStatus();
+  render();
+}
+
+function createAttachedText(parent, pt) {
+  const b = getShapeBounds(parent);
+  const anchor = pt ?? { x: b.left, y: b.top - (TEXT_LINE + TEXT_PAD * 2) - 6 };
+  const shape = { id: nextId++, type: 'text', x: anchor.x, y: anchor.y, text: '', attachTo: parent.id };
+  state.shapes.push(shape);
+  state.selectedIds = new Set([shape.id]);
+  state.selectedGuide = null;
+  state.textEditing = { id: shape.id, vertexAnchor: null };
+  workspace.focus();
+  updateStatus();
+  render();
+}
+
+function startEditText(id) {
+  state.selectedIds = new Set([id]);
+  state.selectedGuide = null;
+  state.textEditing = { id, vertexAnchor: null };
+  workspace.focus();
+  updateStatus();
+  render();
+}
+
+function commitText() {
+  const ed = state.textEditing;
+  if (!ed) return;
+  state.textEditing = null;
+  const t = state.shapes.find(s => s.id === ed.id);
+  if (t) {
+    if (String(t.text).trim() === '') {
+      state.shapes = state.shapes.filter(s => s.id !== t.id); // drop empty text
+      state.selectedIds.delete(t.id);
+    } else if (ed.vertexAnchor) {
+      addGridVertex(ed.vertexAnchor); // standalone text creates its own vertex
+    }
+  }
+  updateStatus();
+  render();
+}
+
+// Typed entry while a text item is being edited. Returns true if the key was consumed.
+function handleTextKey(e) {
+  const t = state.shapes.find(s => s.id === state.textEditing.id);
+  if (!t) { state.textEditing = null; return false; }
+  const k = e.key;
+  if (k === 'Escape') { e.preventDefault(); commitText(); return true; }
+  if (k === 'Enter') {
+    e.preventDefault();
+    if (e.shiftKey) { t.text += '\n'; render(); }
+    else commitText();
+    return true;
+  }
+  if (k === 'Backspace') {
+    e.preventDefault();
+    t.text = String(t.text).slice(0, -1);
+    updateStatus(); render();
+    return true;
+  }
+  if (k.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    t.text += k;
+    updateStatus(); render();
+    return true;
+  }
+  // Swallow everything else (arrows, Tab, function keys) so it can't leak to tools.
+  if (!['Shift', 'Control', 'Alt', 'Meta'].includes(k)) e.preventDefault();
+  return true;
 }
 
 function handleSegmentClick(crossing) {
@@ -2155,6 +2536,9 @@ function onPointerDown(e) {
 
   const raw = getPointerPos(e);
 
+  // Clicking anywhere finalizes an in-progress text edit first.
+  if (state.textEditing) commitText();
+
   // A click while carrying drops the object at the (possibly typed) position.
   if (state.isCarrying) {
     updateShapeMove(raw);
@@ -2184,6 +2568,15 @@ function onPointerDown(e) {
     updateCrossingOverlay(vertex);
     updateStatus();
     render();
+    return;
+  }
+
+  if (state.tool === 'text') {
+    const hit = findShapeAt(raw.x, raw.y);
+    if (hit && hit.type === 'text') { startEditText(hit.id); return; }
+    const { pt } = applySnap(raw);
+    if (hit) createAttachedText(hit, pt); // click a shape → attach
+    else createStandaloneText(pt);        // click empty → own vertex
     return;
   }
 
@@ -2376,11 +2769,25 @@ function onWheel(e) {
 
 const TOOL_KEYS = {
   v: 'select', p: 'stroke', l: 'line', t: 'protractor', s: 'square', e: 'ellipse', c: 'circle',
-  b: 'brush', x: 'eraser',
+  a: 'text',
+  // b: 'brush', x: 'eraser',  // hatch painting disabled for now (HATCH_ENABLED)
 };
 
 function onKeyDown(e) {
   if (e.target.tagName === 'INPUT') return;
+
+  // Live text entry captures every key while a text item is being edited.
+  if (state.textEditing && handleTextKey(e)) return;
+
+  // Tab on a selected object spawns a text attachment and starts editing it.
+  if (e.key === 'Tab' && !state.isDrawing && !state.isCarrying && state.selectedIds.size > 0) {
+    const id = [...state.selectedIds].find(i => {
+      const s = state.shapes.find(sh => sh.id === i);
+      return s && s.type !== 'text';
+    });
+    const shape = state.shapes.find(s => s.id === id);
+    if (shape) { e.preventDefault(); createAttachedText(shape); return; }
+  }
 
   // Exact dimension entry takes priority while a guide is being set.
   if (state.previewGuide && handleDimKey(e)) return;
@@ -2396,6 +2803,19 @@ function onKeyDown(e) {
 
   if (e.key.toLowerCase() === 'o') { toggleOrigin(); return; }
 
+  // Press 'g' twice within G_DOUBLE_MS to open/close the grid & snap panel.
+  if (e.key.toLowerCase() === 'g' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    const now = Date.now();
+    if (state._lastGPress >= 0 && now - state._lastGPress < G_DOUBLE_MS) {
+      state._lastGPress = -1;
+      e.preventDefault();   // don't let the opening 'g' land in the focused grid-size field
+      toggleGridPanel();
+    } else {
+      state._lastGPress = now;
+    }
+    return;
+  }
+
   if (e.code === 'Space' && !state.spaceHeld) {
     e.preventDefault();
     state.spaceHeld = true;
@@ -2410,7 +2830,9 @@ function onKeyDown(e) {
   if (e.key === 'Backspace' || e.key === 'Delete') {
     let changed = false;
     if (state.selectedIds.size > 0) {
-      state.shapes = state.shapes.filter(s => !state.selectedIds.has(s.id));
+      const del = state.selectedIds;
+      state.shapes = state.shapes.filter(s =>
+        !(del.has(s.id) || (s.type === 'text' && s.attachTo != null && del.has(s.attachTo))));
       state.selectedIds.clear();
       changed = true;
     }
@@ -2419,6 +2841,7 @@ function onKeyDown(e) {
   }
 
   if (e.key === 'Escape') {
+    if (state.gridPanelOpen) closeGridPanel();
     if (state.isDraggingGuide) finishGuideDrag(false);
     if (state.isDraggingShapes) restoreShapeDrag();
     endShapeDrag();
@@ -2467,12 +2890,46 @@ function init() {
     setTool(btn.dataset.tool);
   });
 
-  snapGridToggle.addEventListener('change', e => { state.snapGrid = e.target.checked; });
-  snapObjectToggle.addEventListener('change', e => { state.snapObject = e.target.checked; render(); });
+  snapGridToggle.addEventListener('change', e => setSnapGrid(e.target.checked));
+  snapObjectToggle.addEventListener('change', e => setSnapObject(e.target.checked));
   drawCenterToggle.addEventListener('change', e => { state.drawFromCenter = e.target.checked; });
 
   const originBtn = document.getElementById('origin-toggle');
   if (originBtn) originBtn.addEventListener('click', toggleOrigin);
+
+  // Grid & snap panel (g g) controls.
+  if (unitSelect) unitSelect.addEventListener('change', e => setUnit(e.target.value));
+  if (panelSnapGrid) panelSnapGrid.addEventListener('change', e => setSnapGrid(e.target.checked));
+  if (panelSnapObject) panelSnapObject.addEventListener('change', e => setSnapObject(e.target.checked));
+  if (gridSizeInput) {
+    const applyGrid = () => {
+      const n = parseFloat(gridSizeInput.value);
+      if (Number.isFinite(n) && n > 0) setGridSize(unitToPx(n));
+    };
+    const applyGridNoRefresh = () => {
+      const n = parseFloat(gridSizeInput.value);
+      if (Number.isFinite(n) && n > 0) setGridSize(unitToPx(n), false);
+    };
+    gridSizeInput.addEventListener('input', applyGridNoRefresh);
+    gridSizeInput.addEventListener('keydown', e => {
+      // preventScroll: focusing the workspace otherwise scrolls the wide canvas into
+      // view, shoving the rulers off-screen.
+      if (e.key === 'Enter') { applyGrid(); closeGridPanel(); workspace.focus({ preventScroll: true }); }
+      else if (e.key === 'Escape') { closeGridPanel(); workspace.focus({ preventScroll: true }); }
+      e.stopPropagation();
+    });
+  }
+  const gridPanelToggleBtn = document.getElementById('grid-panel-toggle');
+  if (gridPanelToggleBtn) gridPanelToggleBtn.addEventListener('click', toggleGridPanel);
+  // Click outside the panel (and not on its toggle) dismisses it.
+  document.addEventListener('pointerdown', e => {
+    if (!state.gridPanelOpen) return;
+    if (gridPanel && gridPanel.contains(e.target)) return;
+    if (gridPanelToggleBtn && gridPanelToggleBtn.contains(e.target)) return;
+    closeGridPanel();
+  });
+
+  syncControls();
 
   bindRuler(rulerV, 'h');
   bindRuler(rulerH, 'v');
