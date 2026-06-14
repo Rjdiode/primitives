@@ -74,6 +74,7 @@ const state = {
   _protractorPointer: null,
   segmentStart: null,
   segmentHover: null,
+  segmentSpan: null,         // stroke tool: guide segment under cursor {a,b} (single-click create)
   snapGrid: true,
   snapObject: true,
   drawFromCenter: false,
@@ -355,6 +356,43 @@ function crossingsOnGuideFrom(start, worldPt) {
 function snapSegmentPoint(worldPt) {
   if (state.segmentStart) return crossingsOnGuideFrom(state.segmentStart, worldPt);
   return nearestCrossing(worldPt);
+}
+
+// Stroke tool: the guide segment under the cursor — the span between the two adjacent
+// crossings/vertices on whichever guide the cursor is hovering, that bracket it.
+// Returns { a, b } (world points) or null. One click on this span makes a stroke.
+function segmentUnderCursor(worldPt) {
+  const tol = 6 / state.zoom;        // how close to the guide line counts as "on" it
+  const onTol = 0.5 / state.zoom;    // crossing-belongs-to-guide / bracket epsilon
+  const crossings = getCrossings();
+  let best = null;
+
+  const tryGuide = (dist, paramFn, members) => {
+    if (dist > tol || members.length < 2) return;
+    const sorted = members.map(c => ({ c, t: paramFn(c) })).sort((p, q) => p.t - q.t);
+    const pt = paramFn(worldPt);
+    for (let i = 0; i < sorted.length - 1; i++) {
+      if (pt >= sorted[i].t - onTol && pt <= sorted[i + 1].t + onTol) {
+        if (sorted[i + 1].t - sorted[i].t < onTol) break; // degenerate (coincident)
+        if (!best || dist < best.dist) best = { a: sorted[i].c, b: sorted[i + 1].c, dist };
+        break;
+      }
+    }
+  };
+
+  for (const gy of state.guidesH) {
+    tryGuide(Math.abs(worldPt.y - gy), c => c.x, crossings.filter(c => Math.abs(c.y - gy) < onTol));
+  }
+  for (const gx of state.guidesV) {
+    tryGuide(Math.abs(worldPt.x - gx), c => c.y, crossings.filter(c => Math.abs(c.x - gx) < onTol));
+  }
+  for (const ag of state.guidesAngle) {
+    const cos = Math.cos(ag.angle), sin = Math.sin(ag.angle);
+    tryGuide(distToAngledGuide(worldPt.x, worldPt.y, ag), c => c.x * cos + c.y * sin,
+      crossings.filter(c => pointOnAngledGuide(c.x, c.y, ag.x, ag.y, ag.angle)));
+  }
+
+  return best ? { a: best.a, b: best.b } : null;
 }
 
 function isSegmentTool() {
@@ -1489,6 +1527,25 @@ function drawGuides() {
 }
 
 function drawSegmentPreview() {
+  // Stroke tool: solid highlight of the guide segment under the cursor, with end dots.
+  if (state.segmentSpan) {
+    const { a, b } = state.segmentSpan;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.strokeStyle = 'rgba(240, 160, 48, 0.9)';
+    ctx.lineWidth = 3 / state.zoom;
+    ctx.lineCap = 'round';
+    ctx.setLineDash([]);
+    ctx.stroke();
+    for (const p of [a, b]) {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 4 / state.zoom, 0, Math.PI * 2);
+      ctx.fillStyle = '#f0a030';
+      ctx.fill();
+    }
+  }
+
   if (!state.segmentStart || !state.segmentHover) return;
   const a = state.segmentStart;
   const b = state.segmentHover;
@@ -2022,6 +2079,7 @@ function setTool(tool) {
   if (tool !== 'protractor') resetProtractor();
   state.segmentStart = null;
   state.segmentHover = null;
+  state.segmentSpan = null;
   state.selectedGuide = null;
   cancelPlacement();
   endShapeDrag();
@@ -2104,6 +2162,10 @@ function updateStatus() {
   if (isSegmentTool()) {
     if (!getCrossings().length) {
       statusEl.textContent = 'Place guides first';
+    } else if (state.tool === 'stroke') {
+      statusEl.textContent = state.segmentSpan
+        ? 'Stroke · click to draw this segment'
+        : 'Stroke · click a guide segment between two crossings';
     } else if (state.segmentStart) {
       statusEl.textContent = 'Click second crossing';
     } else {
@@ -2550,6 +2612,18 @@ function onPointerDown(e) {
   if (isBrushTool()) return;
 
   if (isSegmentTool()) {
+    // Stroke: one click on a guide segment (between two adjacent crossings) makes it.
+    if (state.tool === 'stroke') {
+      const seg = segmentUnderCursor(raw);
+      if (seg) {
+        addSegment(seg.a, seg.b);
+        state.segmentSpan = null;
+        snapIndicator.hidden = true;
+        updateStatus();
+        render();
+      }
+      return;
+    }
     handleSegmentClick(snapSegmentPoint(raw));
     return;
   }
@@ -2656,6 +2730,12 @@ function onPointerMove(e) {
   }
 
   if (isSegmentTool()) {
+    if (state.tool === 'stroke') {
+      state.segmentSpan = segmentUnderCursor(raw);
+      snapIndicator.hidden = true;
+      render();
+      return;
+    }
     state.segmentHover = state.segmentStart ? crossingsOnGuideFrom(state.segmentStart, raw) : nearestCrossing(raw);
     updateCrossingOverlay(state.segmentHover || state.segmentStart);
     render();
@@ -2849,6 +2929,7 @@ function onKeyDown(e) {
     state.selectedIds.clear();
     state.segmentStart = null;
     state.segmentHover = null;
+    state.segmentSpan = null;
     state.brushAngleKey = null;
     state.brushLast = null;
     state.eraserDown = false;

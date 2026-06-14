@@ -34,8 +34,8 @@ Or open `index.html` directly in a browser (`<script src="app.js">`, not `type="
 | Key | Tool | Interaction |
 |-----|------|-------------|
 | `V` | Select & move | Click shape; **drag to move** (live X/Y + ΔX/ΔY readout, snaps to guides/objects/grid); **click an already-selected shape to “pick it up”** — no-button move, type X/Y or ΔX/ΔY (`Tab` switches field), click or `Enter` to drop, `Esc` cancels. Drag marquee on empty; Shift toggles multi-select |
-| `P` | Stroke | Click two guide crossings on the same guide |
-| `L` | Line | Same as stroke (straight segment primitive) |
+| `P` | Stroke | **Single click on a guide segment** — the span between the two adjacent crossings/vertices the cursor is bracketing on whichever guide it hovers; hover highlights it, click draws it |
+| `L` | Line | **Two-click** crossings: click first crossing, then a second crossing on the same guide (straight segment primitive) |
 | `T` | Protractor | Click grid/vertex → scroll/drag rotate (15°) → click place angled guide |
 | ~~`B`~~ | ~~Brush (cross-hatch)~~ | **Disabled for now** (`HATCH_ENABLED=false`). Code intact; buttons in `#hatch-tools[hidden]`, keys `b`/`x` removed from `TOOL_KEYS`, `setTool` redirects to select, `isBrushTool()` returns false. Flip the flag + unhide to restore |
 | ~~`X`~~ | ~~Eraser~~ | **Disabled for now** — see above |
@@ -57,7 +57,9 @@ Every placed guide also gets a **teal position-value chip at its base on its rul
 3. Second click: permanent purple angled guide via `placeProtractorGuide()`
 4. `_protractorArmPending` blocks same pointer-down from activate + place
 
-**Line/Stroke:** require crossings from `getCrossings()`; second point must share a guide with first (`crossingSharesGuideWith`).
+**Line/Stroke:** both build on crossings from `getCrossings()`.
+- **Line** is the two-click flow: `handleSegmentClick` sets `segmentStart`, then the second click's point (`snapSegmentPoint` → `crossingsOnGuideFrom`) must share a guide with the first (`crossingSharesGuideWith`).
+- **Stroke** is single-click-on-segment: `segmentUnderCursor(worldPt)` finds the guide the cursor is within `6/zoom` of, collects the crossings lying on that guide, sorts them by position along it, and returns the adjacent pair (`{a,b}`) bracketing the cursor — or null. Hover stores it in `state.segmentSpan` (highlighted by `drawSegmentPreview`); a click `addSegment(a,b)`s it directly. Works for H, V, and angled guides.
 
 **Brush / Eraser (cross-hatch):**
 - Paradigm: **trackpad = motion only, number keys = pen-down.** No clicking — `onPointerDown` early-returns for these tools (`isBrushTool()`). Painting/erasing happens in `handleBrushMove()` off `pointermove`, gated by `state.brushAngleKey` / `state.eraserDown`.
@@ -149,7 +151,7 @@ Two conversion boundaries, both crossed by one pair of inverse helpers so a type
 | Units/dims | `worldToDim`, `dimToWorld`, `formatDim`, `fmtLen`, `pxToUnit`, `unitToPx`, `unitDef`, `unitLabel`, `setUnit`, `setGridSize`, `syncControls` |
 | Grid panel | `openGridPanel`, `closeGridPanel`, `toggleGridPanel`, `setSnapGrid`, `setSnapObject` |
 | Guides | `addGuide`, `removeGuide`, `removeNearestGuide`, `nearestGuideValue` (ruler edit hit-test), `bindRuler`, `handleRulerDown`, `drawGuides`, `drawGuideBaseLabels` / `drawRulerGuideChip` (ruler base value chips) |
-| Crossings | `getCrossings`, `nearestCrossing`, `crossingSharesGuideWith`, `crossingsOnGuideFrom` |
+| Crossings | `getCrossings`, `nearestCrossing`, `crossingSharesGuideWith`, `crossingsOnGuideFrom`, `segmentUnderCursor` (stroke segment-click) |
 | Protractor | `activateProtractor`, `placeProtractorGuide`, `setProtractorAngleFromPointer`, `handleProtractorWheel` |
 | Snap | `snapToGrid`, `applySnap`, `findVertexAt`, `addGridVertex` |
 | Shapes | `addSegment`, shape draw helpers, marquee select |
