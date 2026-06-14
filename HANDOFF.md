@@ -165,7 +165,7 @@ Two conversion boundaries, both crossed by one pair of inverse helpers so a type
 - **Rulers** are DOM overlays; guide placement uses `worldYFromClientY` / `worldXFromClientX`.
 - **Toolbar** uses event delegation on `#tools` (`pointerdown` on `.tool`) — fixes `file://` + non-module script load.
 - **Shape types:** `line`, `rect`, `square`, `ellipse`, `circle`, `stroke`, `text` (legacy `pencil` still in bounds code).
-- **Cross-hatch ink** lives in `state.hatches`, a layer parallel to `shapes` — only the eraser touches it; not selectable/movable.
+- **Cross-hatch ink** lives in `state.hatches`, a layer parallel to `shapes` — only the eraser touches it; not selectable/movable. **Painting is currently disabled** (`HATCH_ENABLED=false`); the layer/code remain.
 - **No persistence** — refresh clears canvas state (hatches included).
 - **No tests** in repo.
 
@@ -178,7 +178,7 @@ Two conversion boundaries, both crossed by one pair of inverse helpers so a type
 3. Angled guide crossings wired into `getCrossings()`.
 4. Protractor can drop a vertex **anywhere on the snap grid** (`vertices[]` + `addGridVertex`), not only at existing crossings.
 5. Cross-hatch **brush** (`B`) + **eraser** (`X`): trackpad-motion / key-pen-down model, lattice-snapped marks in `state.hatches`. Caught the falsy-`0` angle guard bug during a Playwright drive.
-6. **Units (px / thou / mm)** + mutable grid, exposed in a **`g g` floating panel**; all typed/shown measurements route through `worldToDim`/`dimToWorld`/`fmtLen`. **Ruler guides are now editable** — click an existing one to lift + retype its position. Verified via Playwright (panel open/close, unit round-trips, grid resize, snap sync, guide place/edit/replace, shape dims in thou). Caught three bugs in the drive: unit switch not refreshing the focused grid field, the opening `g` blanking the number input, and focus-scroll shoving the rulers off-screen.
+6. **Units (px / thou / mm)** + mutable grid, exposed in a **`g g` floating panel**; all typed/shown measurements route through `worldToDim`/`dimToWorld`/`fmtLen`. **Ruler guides are editable** — click an existing one (or its base value-chip on the ruler) to lift + retype its position. **Toolbar wraps** so right-edge controls stay reachable. **Hatch painting disabled** behind `HATCH_ENABLED`. Verified via Playwright (panel open/close, unit round-trips, grid resize, snap sync, guide place/edit/replace, shape dims in thou, ruler chips, brush inert). Caught three bugs in the drive: unit switch not refreshing the focused grid field, the opening `g` blanking the number input, and focus-scroll shoving the rulers off-screen. **Merged to `main` via PR #1** (`a89cc93`).
 
 ---
 
@@ -197,3 +197,4 @@ Two conversion boundaries, both crossed by one pair of inverse helpers so a type
 
 - Account used for push: **Rjdiode** (CLI authenticated).
 - Request was “repo on rjd”; GitHub user `rjd` exists but is not the logged-in account. Repo created as `Rjdiode/primitives`. Transfer or re-auth as `rjd` if a different owner is required.
+- **PR #1** (units / grid panel / editable ruler guides / disable hatch painting) merged to `main` — merge commit `a89cc93`; feature branch `guide-units-grid-panel` deleted local + remote.
