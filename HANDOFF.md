@@ -25,7 +25,7 @@ Or open `index.html` directly in a browser (`<script src="app.js">`, not `type="
 |------|------|
 | `index.html` | Toolbar, workspace (canvas + rulers), footer hints |
 | `styles.css` | Dark drafting UI; `--ruler-size: 28px`; ruler/canvas layout |
-| `app.js` | All logic (~1425 lines) |
+| `app.js` | All logic (~2920 lines) |
 
 ---
 
@@ -37,15 +37,19 @@ Or open `index.html` directly in a browser (`<script src="app.js">`, not `type="
 | `P` | Stroke | Click two guide crossings on the same guide |
 | `L` | Line | Same as stroke (straight segment primitive) |
 | `T` | Protractor | Click grid/vertex → scroll/drag rotate (15°) → click place angled guide |
-| `B` | Brush (cross-hatch) | Trackpad moves the brush; **hold `1`/`2`/`3`/`4`** to ink hatches at 0°/45°/90°/135° (the held key is pen-down). Release to lift. No clicking. Rectangular brush oriented ⟂ to the hatch. Not grid-locked |
-| `X` | Eraser | Trackpad moves it; **hold any of `1`–`4`** and move to wipe hatch marks under a square footprint. Not grid-locked |
+| ~~`B`~~ | ~~Brush (cross-hatch)~~ | **Disabled for now** (`HATCH_ENABLED=false`). Code intact; buttons in `#hatch-tools[hidden]`, keys `b`/`x` removed from `TOOL_KEYS`, `setTool` redirects to select, `isBrushTool()` returns false. Flip the flag + unhide to restore |
+| ~~`X`~~ | ~~Eraser~~ | **Disabled for now** — see above |
+| `A` | Text | **Click empty** → drops a standalone label (creates its own grid vertex on commit). **Click a shape** → attaches a label to it. Type to edit (`Shift`+`Enter` newline, `Enter` commit, `Esc` cancel/discard-if-empty). Also: **`Tab` while any object is selected** spawns an attachment on it and starts typing |
 | — | Rect / Square / Ellipse / Circle | Click first corner → move to size → type exact dims (Tab switches W/H) → click or `Enter` to commit. Live W/H (S / ⌀) dimensions shown; `Esc` cancels; “from center” toggle |
+| `G` `G` | Grid & units panel | Double-press `g` opens a floating popover: **unit** (px / thou / mm), **grid size** (in the active unit), **grid snap**, **object snap**. `Esc` or click-away closes; second `g g` toggles |
 | `Space` + drag | Pan | Middle-click also pans |
 | Pinch / scroll | Zoom | Trackpad scroll pans when not in protractor rotate |
 | `Shift` + ruler click | — | Remove nearest H/V guide |
 | `⌫` | — | Delete selected shapes |
 
-**Rulers:** left = horizontal guides (`guidesH`), bottom = vertical guides (`guidesV`). Hover shows dotted preview; click places.
+**Rulers:** left = horizontal guides (`guidesH`), bottom = vertical guides (`guidesV`). Hover shows dotted preview; **click empty space places** a guide; **click on (or within `SNAP_RADIUS` of) an existing guide picks it up to edit** — it's lifted out of its array and the exact-entry buffer is seeded with its current value (`dimEntryReplace` so the first keystroke types fresh; backspace edits in place). Type a number any time a preview is showing for an exact value; `Enter` places, `Esc` cancels (and restores a lifted guide). Ruler tick labels and the dimension readout are shown in the active unit.
+
+Every placed guide also gets a **teal position-value chip at its base on its ruler** (`drawGuideBaseLabels` → `drawRulerGuideChip`, drawn in `drawRulers`): horizontal guides → left ruler (world-Y), vertical guides → bottom ruler (world-X); the selected guide's chip turns accent. Clicking a chip is just a ruler click on that guide, so it routes through `handleRulerDown`'s edit path — pick up, retype, `Enter`.
 
 **Protractor flow:**
 1. First click: `findVertexAt()` or `addGridVertex()` (grid-snapped) → amber preview arm
@@ -63,6 +67,13 @@ Or open `index.html` directly in a browser (`<script src="app.js">`, not `type="
 - Marks live in `state.hatches` (`{key,x1,y1,x2,y2}`), a separate ink layer — **not** in `shapes`, so select/move/marquee ignore them; only the eraser removes them. Rendered in one batched path by `drawHatches()`. `drawBrushPreview()` draws the cursor footprint (rotated rect for brush, square for eraser).
 - Verified via Playwright drive (`pointermove` + `keyboard.down/up`); see git history.
 
+**Text annotations (`A`):**
+- A text item is a **shape** (`{ type:'text', x, y, text, attachTo }`) stored in `state.shapes`, so it reuses select / move / marquee / delete for free. `(x, y)` is the box's top-left in world space; the box scales with zoom like every other primitive.
+- **Two anchoring modes:** `attachTo: null` (standalone — drops its own grid vertex via `addGridVertex` on commit, satisfying "create its own vertex") vs. `attachTo: <shapeId>` (rides along when its parent moves and draws a faint dashed leader to it). Attached text travels with its parent because `beginShapeDrag` adds any text whose `attachTo` is in `selectedIds` to `dragOriginals`. Deleting a shape cascades to its attached texts.
+- **Live editing:** `state.textEditing = { id, vertexAnchor }`. `handleTextKey()` runs **first** in `onKeyDown` and consumes every key (so tool-letter shortcuts go into the text, not the toolbar). Committing empty text removes the item. Clicking anywhere, or switching tools, commits.
+- **Creation entry points:** text-tool click → `createStandaloneText` / `createAttachedText` / `startEditText` (edit existing); `Tab` on a selection → `createAttachedText` on the first non-text selected shape.
+- Verified via Playwright drive (20 checks: all three creation paths, attached-follows-move, cascade delete, empty-discard).
+
 ---
 
 ## Core state (`app.js`)
@@ -77,15 +88,20 @@ state = {
   _protractorArmPending, _protractorPointer,
   segmentStart, segmentHover,
   snapGrid, snapObject, drawFromCenter,
+  unit, gridPanelOpen, _lastGPress,   // active display unit + grid/units panel (g g)
+  dimEntry, dimEntryReplace,          // exact ruler-guide entry; replace=seeded-on-edit
   panX, panY, zoom,
   hatches[], hatchKeySet,   // cross-hatch ink layer + lattice-key de-dupe set
   brushAngleKey, brushAngle, brushLast,   // brush pen-down state
   eraserDown, eraserLast,   // eraser pen-down state
+  textEditing,              // { id, vertexAnchor } while a text item is being typed
   // drawing / marquee / pan flags...
 }
 ```
 
-**Constants:** `GRID_SIZE=20`, `RULER_SIZE=28`, `CROSSING_RADIUS=12`, `PROTRACTOR_STEP_DEG=15`, `MIN_ZOOM=0.1`, `MAX_ZOOM=8`.
+Text items are not a separate array — they live in `shapes[]` as `{ type:'text', x, y, text, attachTo }`.
+
+**Constants:** `GRID_SIZE=20` (mutable `let`), `MIN_GRID=2`, `RULER_SIZE=28`, `CROSSING_RADIUS=12`, `PROTRACTOR_STEP_DEG=15`, `MIN_ZOOM=0.1`, `MAX_ZOOM=8`, `PX_PER_INCH=100`, `UNITS{px,thou,mm}`, `G_DOUBLE_MS=500`.
 **Brush:** `HATCH_ANGLES{1:0,2:45°,3:90°,4:135°}`, `HATCH_SPACING=6`, `HATCH_CELL=6`, `BRUSH_LEN=46` (⟂ extent), `BRUSH_THICK=20` (along-hatch), `BRUSH_STEP=5`, `ERASER_SIZE=30`.
 
 ---
@@ -102,17 +118,43 @@ state = {
 
 ---
 
+## Units & dimensions
+
+World coordinates are **pixels**; the physical scale is fixed at **`PX_PER_INCH = 100`** (100 world px = 1 inch), so units are just re-expressions of the same world length. `state.unit` ∈ `px | thou | mm`; `UNITS[unit] = { label, factor, decimals }` where `factor` is **world px per 1 display unit** (px → 1, thou → 0.1, mm → 100/25.4 ≈ 3.937).
+
+Two conversion boundaries, both crossed by one pair of inverse helpers so a typed value round-trips back to the same world coordinate:
+- **origin** — sign of the Y axis (`originCorner`; X is always rightward-positive).
+- **unit** — `pxToUnit` / `unitToPx`.
+
+| Direction | Function | Returns |
+|-----------|----------|---------|
+| world → display | `worldToDim(axis, worldVal)` | origin-signed, unit-scaled number |
+| display → world | `dimToWorld(axis, dimVal)` | world px |
+| format a display number | `formatDim(v)` | string at the unit's `decimals` |
+| format a raw world length | `fmtLen(px)` = `formatDim(pxToUnit(px))` | string |
+
+**Rule of thumb:** anything that is a *typed/shown measurement* (guide values, shape W/H/S/⌀, X/Y/Δ move readout, ruler labels) goes through these. Raw geometry (shape coords, hatch lattice, snap math, `GRID_SIZE`) stays in world px. When adding a new readout, format world px via `fmtLen`/`fmtSigned`-equivalent and append `unitLabel()`; when parsing a typed field, `unitToPx` it.
+
+`GRID_SIZE` is now a **mutable `let`** (default 20 px, floor `MIN_GRID`), changed via `setGridSize(px, refreshGridInput?)`. The grid-size field is entered in the active unit. `syncControls(refreshGridInput=true)` is the single source-of-truth fan-out to every DOM control (toolbar + panel checkboxes, unit select, grid field, unit label) — call it after any unit/grid/snap state change. `refreshGridInput=false` only while the user is typing into the grid field (so live input isn't clobbered); a unit change always refreshes it.
+
+**Grid panel (`g g`):** `openGridPanel` / `closeGridPanel` / `toggleGridPanel`. Double-`g` is detected in `onKeyDown` via `state._lastGPress` + `G_DOUBLE_MS`; the opening keystroke is `preventDefault`ed so it doesn't land in the auto-focused (number) grid-size field — a `type=number` input silently blanks itself on a non-numeric key. All panel `focus()` calls pass `{ preventScroll: true }`, and `#app` is `overflow:hidden`, so focusing controls can't scroll the over-wide canvas and shove the rulers off-screen.
+
+---
+
 ## Key functions (grep targets)
 
 | Area | Functions |
 |------|-----------|
-| Coords | `screenToWorld`, `worldToScreen`, `drawAreaSize` |
-| Guides | `addGuide`, `removeGuide`, `bindRuler`, `drawGuides` |
+| Coords | `screenToWorld`, `worldToScreen`, `drawAreaSize`, `rawWorld{X,Y}FromClient*` (unsnapped), `world{X,Y}FromClient*` (grid-snapped) |
+| Units/dims | `worldToDim`, `dimToWorld`, `formatDim`, `fmtLen`, `pxToUnit`, `unitToPx`, `unitDef`, `unitLabel`, `setUnit`, `setGridSize`, `syncControls` |
+| Grid panel | `openGridPanel`, `closeGridPanel`, `toggleGridPanel`, `setSnapGrid`, `setSnapObject` |
+| Guides | `addGuide`, `removeGuide`, `removeNearestGuide`, `nearestGuideValue` (ruler edit hit-test), `bindRuler`, `handleRulerDown`, `drawGuides`, `drawGuideBaseLabels` / `drawRulerGuideChip` (ruler base value chips) |
 | Crossings | `getCrossings`, `nearestCrossing`, `crossingSharesGuideWith`, `crossingsOnGuideFrom` |
 | Protractor | `activateProtractor`, `placeProtractorGuide`, `setProtractorAngleFromPointer`, `handleProtractorWheel` |
 | Snap | `snapToGrid`, `applySnap`, `findVertexAt`, `addGridVertex` |
 | Shapes | `addSegment`, shape draw helpers, marquee select |
 | Brush/Eraser | `stampHatch`, `stampStroke`, `eraseAt`, `eraseStroke`, `handleBrushMove`, `handleBrushKeyDown/Up`, `isBrushTool`, `drawHatches`, `drawBrushPreview` |
+| Text | `createStandaloneText`, `createAttachedText`, `startEditText`, `commitText`, `handleTextKey`, `measureTextShape`, `drawTextShape`, `drawTextConnector` |
 | Input | `onPointerDown/Move/Up`, `onWheel`, `onKeyDown`, `setTool` |
 
 ---
@@ -122,7 +164,7 @@ state = {
 - **Single canvas** for grid, shapes, guides, crossings, protractor preview.
 - **Rulers** are DOM overlays; guide placement uses `worldYFromClientY` / `worldXFromClientX`.
 - **Toolbar** uses event delegation on `#tools` (`pointerdown` on `.tool`) — fixes `file://` + non-module script load.
-- **Shape types:** `line`, `rect`, `square`, `ellipse`, `circle`, `stroke` (legacy `pencil` still in bounds code).
+- **Shape types:** `line`, `rect`, `square`, `ellipse`, `circle`, `stroke`, `text` (legacy `pencil` still in bounds code).
 - **Cross-hatch ink** lives in `state.hatches`, a layer parallel to `shapes` — only the eraser touches it; not selectable/movable.
 - **No persistence** — refresh clears canvas state (hatches included).
 - **No tests** in repo.
@@ -136,13 +178,15 @@ state = {
 3. Angled guide crossings wired into `getCrossings()`.
 4. Protractor can drop a vertex **anywhere on the snap grid** (`vertices[]` + `addGridVertex`), not only at existing crossings.
 5. Cross-hatch **brush** (`B`) + **eraser** (`X`): trackpad-motion / key-pen-down model, lattice-snapped marks in `state.hatches`. Caught the falsy-`0` angle guard bug during a Playwright drive.
+6. **Units (px / thou / mm)** + mutable grid, exposed in a **`g g` floating panel**; all typed/shown measurements route through `worldToDim`/`dimToWorld`/`fmtLen`. **Ruler guides are now editable** — click an existing one to lift + retype its position. Verified via Playwright (panel open/close, unit round-trips, grid resize, snap sync, guide place/edit/replace, shape dims in thou). Caught three bugs in the drive: unit switch not refreshing the focused grid field, the opening `g` blanking the number input, and focus-scroll shoving the rulers off-screen.
 
 ---
 
 ## Likely next steps
 
-- Persist guides/shapes/vertices (localStorage or file export).
+- Persist guides/shapes/vertices **and unit/grid settings** (localStorage or file export).
 - Undo/redo.
+- Calibratable `PX_PER_INCH` (currently fixed at 100) — e.g. a DPI field in the grid panel for bench work.
 - Move/delete angled guides and grid vertices.
 - Snap line/stroke endpoints to shape vertices as well as guide crossings.
 - Touch / stylus polish.
