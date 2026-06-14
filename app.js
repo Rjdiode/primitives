@@ -126,8 +126,203 @@ const gridSizeUnit = document.getElementById('grid-size-unit');
 const panelSnapGrid = document.getElementById('panel-snap-grid');
 const panelSnapObject = document.getElementById('panel-snap-object');
 const unitLabelBtn = document.getElementById('unit-label');
+const undoBtn = document.getElementById('undo-btn');
+const redoBtn = document.getElementById('redo-btn');
+const saveBtn = document.getElementById('save-btn');
+const openBtn = document.getElementById('open-btn');
+const fileInput = document.getElementById('file-input');
 
 let nextId = 1;
+
+// ─── History (undo/redo) ──────────────────────────────────────────────────────
+// Snapshot-based: each committed document change pushes the prior snapshot onto
+// `past`. recordHistory() diffs against the current snapshot, so it's a no-op when
+// nothing actually changed — safe to call liberally at commit points.
+const history = { past: [], future: [], present: null, limit: 200 };
+const STORAGE_KEY = 'primitives.doc.v1';
+
+// The undoable / persisted document (geometry + ink). Settings/view ride along in
+// the saved file but are not part of the undo snapshot.
+function docData() {
+  return {
+    shapes: state.shapes,
+    guidesH: state.guidesH,
+    guidesV: state.guidesV,
+    guidesAngle: state.guidesAngle,
+    vertices: state.vertices,
+    hatches: state.hatches,
+    nextId,
+  };
+}
+
+function docSnapshot() { return JSON.stringify(docData()); }
+
+function maxShapeId() {
+  return state.shapes.reduce((m, s) => Math.max(m, s.id || 0), 0);
+}
+
+function loadDocData(d) {
+  state.shapes = d.shapes || [];
+  state.guidesH = d.guidesH || [];
+  state.guidesV = d.guidesV || [];
+  state.guidesAngle = d.guidesAngle || [];
+  state.vertices = d.vertices || [];
+  state.hatches = d.hatches || [];
+  state.hatchKeySet = new Set(state.hatches.map(h => h.key));
+  nextId = Number.isFinite(d.nextId) ? d.nextId : maxShapeId() + 1;
+  // Drop transient interaction state that may reference vanished ids.
+  state.selectedIds = new Set();
+  state.selectedGuide = null;
+  state.segmentStart = state.segmentHover = state.segmentSpan = null;
+  state.textEditing = null;
+  state.isDrawing = state.isCarrying = state.isDraggingShapes = state.isDraggingGuide = false;
+}
+
+function initHistory() {
+  history.past = [];
+  history.future = [];
+  history.present = docSnapshot();
+  updateHistoryButtons();
+}
+
+function recordHistory() {
+  const snap = docSnapshot();
+  if (snap === history.present) return;          // nothing changed
+  if (history.present !== null) history.past.push(history.present);
+  if (history.past.length > history.limit) history.past.shift();
+  history.present = snap;
+  history.future = [];
+  autosave();
+  updateHistoryButtons();
+}
+
+function undo() {
+  if (!history.past.length) return;
+  history.future.push(history.present);
+  history.present = history.past.pop();
+  loadDocData(JSON.parse(history.present));
+  afterHistoryRestore();
+}
+
+function redo() {
+  if (!history.future.length) return;
+  history.past.push(history.present);
+  history.present = history.future.pop();
+  loadDocData(JSON.parse(history.present));
+  afterHistoryRestore();
+}
+
+function afterHistoryRestore() {
+  autosave();
+  updateHistoryButtons();
+  snapIndicator.hidden = true;
+  updateStatus();
+  render();
+}
+
+function updateHistoryButtons() {
+  if (undoBtn) undoBtn.disabled = history.past.length === 0;
+  if (redoBtn) redoBtn.disabled = history.future.length === 0;
+}
+
+// ─── Save / load (file + localStorage) ────────────────────────────────────────
+function clampZoom(z) { return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, z)); }
+
+function serializeDocument() {
+  return {
+    type: 'primitives-document',
+    version: 1,
+    ...docData(),
+    settings: {
+      unit: state.unit,
+      gridSize: GRID_SIZE,
+      snapGrid: state.snapGrid,
+      snapObject: state.snapObject,
+      originCorner: state.originCorner,
+    },
+    view: { panX: state.panX, panY: state.panY, zoom: state.zoom },
+  };
+}
+
+function applyDocument(doc, { restoreView = true } = {}) {
+  loadDocData(doc);
+  const s = doc.settings || {};
+  if (s.unit && UNITS[s.unit]) state.unit = s.unit;
+  if (Number.isFinite(s.gridSize)) GRID_SIZE = Math.max(MIN_GRID, s.gridSize);
+  if (typeof s.snapGrid === 'boolean') state.snapGrid = s.snapGrid;
+  if (typeof s.snapObject === 'boolean') state.snapObject = s.snapObject;
+  if (s.originCorner) state.originCorner = s.originCorner;
+  if (restoreView && doc.view) {
+    if (Number.isFinite(doc.view.panX)) state.panX = doc.view.panX;
+    if (Number.isFinite(doc.view.panY)) state.panY = doc.view.panY;
+    if (Number.isFinite(doc.view.zoom)) state.zoom = clampZoom(doc.view.zoom);
+  }
+  const lbl = document.getElementById('origin-label');
+  if (lbl) lbl.textContent = `Origin: ${state.originCorner === 'bottom-left' ? 'bottom-left' : 'top-left'}`;
+  syncControls();
+}
+
+function autosave() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(serializeDocument())); } catch (e) { /* quota/full */ }
+}
+
+function restoreAutosave() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return false;
+    applyDocument(JSON.parse(raw));
+    return true;
+  } catch (e) { return false; }
+}
+
+function fileStamp() {
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+function saveToFile() {
+  const json = JSON.stringify(serializeDocument(), null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `primitives-${fileStamp()}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  flashStatus('Saved to file');
+}
+
+function openFileDialog() {
+  if (fileInput) fileInput.click();
+}
+
+function loadFromFile(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const doc = JSON.parse(reader.result);
+      if (!doc || (!doc.shapes && !doc.guidesH && !doc.guidesV)) throw new Error('not a document');
+      applyDocument(doc);
+      initHistory();
+      updateStatus();
+      render();
+      flashStatus(`Loaded ${file.name}`);
+    } catch (err) {
+      flashStatus('Load failed — not a Primitives file');
+    }
+  };
+  reader.readAsText(file);
+}
+
+let _flashTimer = null;
+function flashStatus(msg) {
+  statusEl.textContent = msg;
+  if (_flashTimer) clearTimeout(_flashTimer);
+  _flashTimer = setTimeout(() => { _flashTimer = null; updateStatus(); }, 1800);
+}
 
 // ─── Coordinates ──────────────────────────────────────────────────────────────
 function drawAreaSize() {
@@ -524,6 +719,7 @@ function placeProtractorGuide() {
   if (state.protractorAngle === null) state.protractorAngle = 0;
   dropProtractorGuide();
   resetProtractor();
+  recordHistory();
 }
 
 // ─── Dimensions ───────────────────────────────────────────────────────────────
@@ -562,6 +758,7 @@ function setOrigin(corner) {
   state.originCorner = corner;
   const lbl = document.getElementById('origin-label');
   if (lbl) lbl.textContent = `Origin: ${corner === 'bottom-left' ? 'bottom-left' : 'top-left'}`;
+  autosave();
   updateStatus();
   render();
 }
@@ -592,6 +789,7 @@ function setUnit(u) {
   if (!UNITS[u]) return;
   state.unit = u;
   syncControls();
+  autosave();
   updateStatus();
   render();
 }
@@ -600,11 +798,12 @@ function setGridSize(px, refreshGridInput = true) {
   if (!Number.isFinite(px)) return;
   GRID_SIZE = Math.max(MIN_GRID, px);
   syncControls(refreshGridInput);
+  autosave();
   render();
 }
 
-function setSnapGrid(v) { state.snapGrid = v; syncControls(); render(); }
-function setSnapObject(v) { state.snapObject = v; syncControls(); render(); }
+function setSnapGrid(v) { state.snapGrid = v; syncControls(); autosave(); render(); }
+function setSnapObject(v) { state.snapObject = v; syncControls(); autosave(); render(); }
 
 function openGridPanel() {
   state.gridPanelOpen = true;
@@ -655,6 +854,7 @@ function commitDim() {
   addGuide(state.previewGuide.axis, state.previewGuide.value); // exact, not grid-snapped
   state.dimEntry = null;
   state.dimEntryReplace = false;
+  recordHistory();
   updateStatus();
   render();
 }
@@ -666,6 +866,7 @@ function cancelDim() {
   }
   state.dimEntry = null;
   state.dimEntryReplace = false;
+  recordHistory();   // no-op when the guide was simply restored to where it was
   updateStatus();
   render();
 }
@@ -1004,6 +1205,7 @@ function addSegment(a, b) {
     : { id: nextId++, type: 'line', x: a.x, y: a.y, x2: b.x, y2: b.y };
   state.shapes.push(shape);
   state.selectedIds = new Set([shape.id]);
+  recordHistory();
 }
 
 // ─── Selection & move ─────────────────────────────────────────────────────────
@@ -1307,6 +1509,7 @@ function endShapeDrag() {
 function commitMove() {
   endShapeDrag();
   snapIndicator.hidden = true;
+  recordHistory();   // no-op if the selection didn't actually move (e.g. cancelMove)
   updateStatus();
   render();
 }
@@ -1411,6 +1614,7 @@ function finishGuideDrag(commit = true) {
   state.dragGuideOrig = null;
   state.dragAnchor = null;
   state.dragSnapTarget = null;
+  recordHistory();   // no-op on cancel (guide restored to its original spot)
 }
 
 // ─── Rendering ────────────────────────────────────────────────────────────────
@@ -1873,6 +2077,7 @@ function finalizeShape() {
   const shape = { id: nextId++, ...preview };
   state.shapes.push(shape);
   state.selectedIds = new Set([shape.id]);
+  recordHistory();
   return true;
 }
 
@@ -2242,6 +2447,7 @@ function handleRulerDown(axis, clientPos, shiftKey) {
   if (shiftKey) {
     removeNearestGuide(axis, raw);
     state.previewGuide = { axis, value: snapGuideValue(raw) };
+    recordHistory();
     updateStatus();
     render();
     return;
@@ -2263,6 +2469,7 @@ function handleRulerDown(axis, clientPos, shiftKey) {
   const value = snapGuideValue(raw);
   addGuide(axis, value);
   state.previewGuide = { axis, value };
+  recordHistory();
   updateStatus();
   render();
 }
@@ -2535,6 +2742,7 @@ function commitText() {
       addGridVertex(ed.vertexAnchor); // standalone text creates its own vertex
     }
   }
+  recordHistory();   // no-op if an empty text was created then discarded
   updateStatus();
   render();
 }
@@ -2640,6 +2848,7 @@ function onPointerDown(e) {
     const vertex = findVertexAt(raw.x, raw.y) ?? addGridVertex(raw);
     activateProtractor(vertex, raw);
     updateCrossingOverlay(vertex);
+    recordHistory();   // records only when a new grid vertex was actually dropped
     updateStatus();
     render();
     return;
@@ -2856,6 +3065,15 @@ const TOOL_KEYS = {
 function onKeyDown(e) {
   if (e.target.tagName === 'INPUT') return;
 
+  // History / file shortcuts (⌘/Ctrl). Commit any in-progress text first.
+  if (e.metaKey || e.ctrlKey) {
+    const k = e.key.toLowerCase();
+    if (k === 'z') { e.preventDefault(); if (state.textEditing) commitText(); e.shiftKey ? redo() : undo(); return; }
+    if (k === 'y') { e.preventDefault(); if (state.textEditing) commitText(); redo(); return; }
+    if (k === 's') { e.preventDefault(); if (state.textEditing) commitText(); saveToFile(); return; }
+    if (k === 'o') { e.preventDefault(); if (state.textEditing) commitText(); openFileDialog(); return; }
+  }
+
   // Live text entry captures every key while a text item is being edited.
   if (state.textEditing && handleTextKey(e)) return;
 
@@ -2917,7 +3135,7 @@ function onKeyDown(e) {
       changed = true;
     }
     if (state.selectedGuide) changed = deleteSelectedGuide() || changed;
-    if (changed) render();
+    if (changed) { recordHistory(); render(); }
   }
 
   if (e.key === 'Escape') {
@@ -3010,6 +3228,17 @@ function init() {
     closeGridPanel();
   });
 
+  // History + file actions.
+  if (undoBtn) undoBtn.addEventListener('click', undo);
+  if (redoBtn) redoBtn.addEventListener('click', redo);
+  if (saveBtn) saveBtn.addEventListener('click', saveToFile);
+  if (openBtn) openBtn.addEventListener('click', openFileDialog);
+  if (fileInput) fileInput.addEventListener('change', (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (f) loadFromFile(f);
+    e.target.value = ''; // allow re-opening the same file
+  });
+
   syncControls();
 
   bindRuler(rulerV, 'h');
@@ -3044,6 +3273,11 @@ function init() {
   const area = drawAreaSize();
   state.panX = area.w / 2;
   state.panY = area.h / 2;
+
+  // Restore the autosaved working document (if any), then seed the history baseline.
+  restoreAutosave();
+  initHistory();
+  updateStatus();
   render();
 }
 

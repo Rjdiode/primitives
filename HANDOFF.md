@@ -46,6 +46,10 @@ Or open `index.html` directly in a browser (`<script src="app.js">`, not `type="
 | Pinch / scroll | Zoom | Trackpad scroll pans when not in protractor rotate |
 | `Shift` + ruler click | — | Remove nearest H/V guide |
 | `⌫` | — | Delete selected shapes |
+| `⌘`/`Ctrl`+`Z` | Undo | Toolbar ↶ button too |
+| `⌘`/`Ctrl`+`Shift`+`Z` / `Ctrl`+`Y` | Redo | Toolbar ↷ button too |
+| `⌘`/`Ctrl`+`S` | Save to file | Downloads a `.json` document; toolbar ▾ button |
+| `⌘`/`Ctrl`+`O` | Open file | Loads a `.json` document; toolbar ▴ button |
 
 **Rulers:** left = horizontal guides (`guidesH`), bottom = vertical guides (`guidesV`). Hover shows dotted preview; **click empty space places** a guide; **click on (or within `SNAP_RADIUS` of) an existing guide picks it up to edit** — it's lifted out of its array and the exact-entry buffer is seeded with its current value (`dimEntryReplace` so the first keystroke types fresh; backspace edits in place). Type a number any time a preview is showing for an exact value; `Enter` places, `Esc` cancels (and restores a lifted guide). Ruler tick labels and the dimension readout are shown in the active unit.
 
@@ -139,6 +143,16 @@ Two conversion boundaries, both crossed by one pair of inverse helpers so a type
 
 `GRID_SIZE` is now a **mutable `let`** (default 20 px, floor `MIN_GRID`), changed via `setGridSize(px, refreshGridInput?)`. The grid-size field is entered in the active unit. `syncControls(refreshGridInput=true)` is the single source-of-truth fan-out to every DOM control (toolbar + panel checkboxes, unit select, grid field, unit label) — call it after any unit/grid/snap state change. `refreshGridInput=false` only while the user is typing into the grid field (so live input isn't clobbered); a unit change always refreshes it.
 
+---
+
+## History & persistence
+
+**Undo/redo** is snapshot-based (`history = { past, future, present, limit }`). The undoable document — `docData()` = shapes, guidesH/V, guidesAngle, vertices, hatches, nextId — is JSON-serialized at each commit point by **`recordHistory()`**, which diffs against `history.present` and is a **no-op when nothing changed**, so it's safe to call liberally (cancelled drags, restored guides, discarded empty text all self-cancel). `undo`/`redo` swap snapshots through `loadDocData()` (which also clears id-referencing transient state). Settings/view are **not** in the undo snapshot.
+
+`recordHistory()` call sites (the commit points): `finalizeShape`, `addSegment`, `commitMove`, `commitDim`/`cancelDim`, `finishGuideDrag`, `handleRulerDown` (place + shift-remove), the protractor arm (vertex drop) + `placeProtractorGuide`, `commitText`, and the delete handler. Add a call at any **new** mutation commit you introduce.
+
+**Persistence:** `serializeDocument()` = `docData()` + `settings` (unit, gridSize, snapGrid, snapObject, originCorner) + `view` (pan/zoom). `applyDocument()` restores all of it. `autosave()` writes it to `localStorage` on every `recordHistory()` and on settings changes; `restoreAutosave()` runs once in `init()` before `initHistory()` seeds the baseline. `saveToFile()` / `loadFromFile()` (via the hidden `#file-input`) export/import the same shape as a `.json` file. `flashStatus()` shows transient "Saved"/"Loaded" toasts in the status bar.
+
 **Grid panel (`g g`):** `openGridPanel` / `closeGridPanel` / `toggleGridPanel`. Double-`g` is detected in `onKeyDown` via `state._lastGPress` + `G_DOUBLE_MS`; the opening keystroke is `preventDefault`ed so it doesn't land in the auto-focused (number) grid-size field — a `type=number` input silently blanks itself on a non-numeric key. All panel `focus()` calls pass `{ preventScroll: true }`, and `#app` is `overflow:hidden`, so focusing controls can't scroll the over-wide canvas and shove the rulers off-screen.
 
 ---
@@ -158,6 +172,8 @@ Two conversion boundaries, both crossed by one pair of inverse helpers so a type
 | Brush/Eraser | `stampHatch`, `stampStroke`, `eraseAt`, `eraseStroke`, `handleBrushMove`, `handleBrushKeyDown/Up`, `isBrushTool`, `drawHatches`, `drawBrushPreview` |
 | Text | `createStandaloneText`, `createAttachedText`, `startEditText`, `commitText`, `handleTextKey`, `measureTextShape`, `drawTextShape`, `drawTextConnector` |
 | Input | `onPointerDown/Move/Up`, `onWheel`, `onKeyDown`, `setTool` |
+| History | `recordHistory`, `undo`, `redo`, `docData`/`docSnapshot`, `loadDocData`, `initHistory`, `updateHistoryButtons` |
+| Persistence | `serializeDocument`, `applyDocument`, `saveToFile`, `loadFromFile`, `openFileDialog`, `autosave`, `restoreAutosave`, `flashStatus` |
 
 ---
 
@@ -168,8 +184,8 @@ Two conversion boundaries, both crossed by one pair of inverse helpers so a type
 - **Toolbar** uses event delegation on `#tools` (`pointerdown` on `.tool`) — fixes `file://` + non-module script load.
 - **Shape types:** `line`, `rect`, `square`, `ellipse`, `circle`, `stroke`, `text` (legacy `pencil` still in bounds code).
 - **Cross-hatch ink** lives in `state.hatches`, a layer parallel to `shapes` — only the eraser touches it; not selectable/movable. **Painting is currently disabled** (`HATCH_ENABLED=false`); the layer/code remain.
-- **No persistence** — refresh clears canvas state (hatches included).
-- **No tests** in repo.
+- **Persistence:** the working document **autosaves to `localStorage`** (`primitives.doc.v1`) on every change and restores on load, so a refresh no longer clears the canvas. Explicit **file save/load** (`⌘S`/`⌘O`) export/import a `.json` document.
+- **No tests** in repo (verified via Playwright drives; see git history).
 
 ---
 
@@ -181,13 +197,15 @@ Two conversion boundaries, both crossed by one pair of inverse helpers so a type
 4. Protractor can drop a vertex **anywhere on the snap grid** (`vertices[]` + `addGridVertex`), not only at existing crossings.
 5. Cross-hatch **brush** (`B`) + **eraser** (`X`): trackpad-motion / key-pen-down model, lattice-snapped marks in `state.hatches`. Caught the falsy-`0` angle guard bug during a Playwright drive.
 6. **Units (px / thou / mm)** + mutable grid, exposed in a **`g g` floating panel**; all typed/shown measurements route through `worldToDim`/`dimToWorld`/`fmtLen`. **Ruler guides are editable** — click an existing one (or its base value-chip on the ruler) to lift + retype its position. **Toolbar wraps** so right-edge controls stay reachable. **Hatch painting disabled** behind `HATCH_ENABLED`. Verified via Playwright (panel open/close, unit round-trips, grid resize, snap sync, guide place/edit/replace, shape dims in thou, ruler chips, brush inert). Caught three bugs in the drive: unit switch not refreshing the focused grid field, the opening `g` blanking the number input, and focus-scroll shoving the rulers off-screen. **Merged to `main` via PR #1** (`a89cc93`).
+7. **Stroke tool** reworked to single-click-on-guide-segment (`segmentUnderCursor`). **Undo/redo** (snapshot-based, `⌘Z`/`⌘⇧Z`/`Ctrl+Y` + toolbar buttons), **localStorage autosave/restore**, and **file save/load** (`⌘S`/`⌘O`, `.json`). Verified via Playwright (undo/redo stacks + button states, redo-clears-on-new-action, save file content, autosave survives reload, load + history reset, settings round-trip).
 
 ---
 
 ## Likely next steps
 
-- Persist guides/shapes/vertices **and unit/grid settings** (localStorage or file export).
-- Undo/redo.
+- ~~Persist guides/shapes/vertices and settings~~ — done (localStorage autosave + `.json` file save/load).
+- ~~Undo/redo~~ — done (snapshot-based).
+- A "New / clear document" action (autosave-restore means a refresh keeps the canvas; there's currently no one-click clear).
 - Calibratable `PX_PER_INCH` (currently fixed at 100) — e.g. a DPI field in the grid panel for bench work.
 - Move/delete angled guides and grid vertices.
 - Snap line/stroke endpoints to shape vertices as well as guide crossings.

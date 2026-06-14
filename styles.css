@@ -84,6 +84,32 @@ html, body {
 .tool.active { color: var(--bg); background: var(--accent); }
 .tool.active svg { color: var(--bg); }
 
+.actions {
+  display: flex;
+  gap: 2px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px;
+}
+
+.action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s;
+}
+
+.action svg { flex-shrink: 0; }
+.action:hover:not(:disabled) { color: var(--text); background: rgba(255, 255, 255, 0.05); }
+.action:disabled { opacity: 0.35; cursor: default; }
+
 .toggles {
   display: flex;
   flex-wrap: wrap;
